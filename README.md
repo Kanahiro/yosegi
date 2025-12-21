@@ -6,7 +6,7 @@ Yosegi is a tool to generate Pyramid (Geo)Parquet files - optimized for streamin
 
 ```bash
 uv sync
-uv run main.py input.shp output.parquet --minzoom 0 --maxzoom 14
+uv run main.py input.parquet output.pyramid.parquet
 # other options are available
 uv run main.py -h
 ```
