@@ -25,9 +25,11 @@ uv run main.py -h
 - Unlike GeoTIFF, lower resolution data are not repeadted because it is vector.
 
 https://github.com/user-attachments/assets/4df86816-559d-4b34-b57a-2f3d4b8bd14c
+
 *QGIS: read Pyramid parquet on Amazon S3*
 
 https://github.com/user-attachments/assets/26e2f662-474b-4d11-ab56-f73587ef8b2e
+
 *Browser: load same parquet and rendered with GeoArrowScatterPlotLayer*
 
 #### Structure
