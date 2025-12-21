@@ -26,11 +26,13 @@ uv run main.py -h
 
 <https://github.com/user-attachments/assets/4df86816-559d-4b34-b57a-2f3d4b8bd14c>
 
-*QGIS: read Pyramid parquet on Amazon S3. Blue to Red means zoomlevel*
+*QGIS: read Pyramid parquet on Amazon S3. Blue to Red means zoomlevel. Data: OvertureMaps*
 
-<details><summary>Example: loading raw parquet (sorted only by spatially)</summary><div>
+<details><summary>Example: loading raw parquet (sorted only by spatially)</summary>
 
-</div></details>
+https://github.com/user-attachments/assets/4e7a61f2-eb78-4658-a55f-8de31e2796c9
+
+</details>
 
 <https://github.com/user-attachments/assets/26e2f662-474b-4d11-ab56-f73587ef8b2e>
 
