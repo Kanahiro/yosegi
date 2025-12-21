@@ -19,10 +19,10 @@ uv run main.py -h
 - Pre-calculate quadkey for each feature.
 - Sort features by zoomlevel and quadkey.
 
-**By these steps, generate Pyramid-structure in a single Parquet file, just like GeoTIFF pyramid.** With pyramid structure:
+**By these steps, generate Pyramid-structure in a single Parquet file, just like GeoTIFF pyramid.**
 
-- Overview of entire data can be obtained quickly.
-- Unlike GeoTIFF, lower resolution data are not repeadted because it is vector.
+- Like GeoTIFF, overview of entire data can be obtained quickly.
+- Unlike GeoTIFF, lower resolution data are not repeadted because this is vector.
 
 <https://github.com/user-attachments/assets/4df86816-559d-4b34-b57a-2f3d4b8bd14c>
 
@@ -110,28 +110,28 @@ Pyramid structure:
 │          ·           │          ·           │ · │   ·     │         · │          ·           │
 │          ·           │          ·           │ · │   ·     │         · │          ·           │
 │          ·           │          ·           │ · │   ·     │         · │          ·           │
-│ 34cb0782-de88-4a38…  │ POINT (142.1916148…  │ … │ place   │        16 │ 133021232223310122…  │
-│ fa47e5bb-fb82-4538…  │ POINT (142.1916161…  │ … │ place   │        16 │ 133021232223310122…  │
-│ 5463f9f8-e5b8-4f91…  │ POINT (142.1944501…  │ … │ place   │        16 │ 133021232223310130…  │
-│ 659a8a01-bc4e-413f…  │ POINT (142.194466 …  │ … │ place   │        16 │ 133021232223310130…  │
-│ b265751b-dfe2-48d0…  │ POINT (142.19446 2…  │ … │ place   │        16 │ 133021232223310130…  │
-│ a4248cd0-ce3c-43cd…  │ POINT (142.194462 …  │ … │ place   │        16 │ 133021232223310130…  │
-│ 6c738f13-2fe4-4fcf…  │ POINT (142.1941014…  │ … │ place   │        16 │ 133021232223310130…  │
-│ fcdc9609-0736-42b0…  │ POINT (142.1955894…  │ … │ place   │        16 │ 133021232223310131…  │
-│ a8d9e490-b694-4395…  │ POINT (142.1949624…  │ … │ place   │        16 │ 133021232223310131…  │
 │ 9df90671-893f-4eef…  │ POINT (142.2133026…  │ … │ place   │        16 │ 133021232232220102…  │
-│ d4d27ec8-66eb-462c…  │ POINT (142.2133 27…  │ … │ place   │        16 │ 133021232232220102…  │
-│ 2e6fe019-9d7f-44e9…  │ POINT (142.2134482…  │ … │ place   │        16 │ 133021232232220102…  │
+│ 077e4ee4-ef79-47ed…  │ POINT (142.213372 …  │ … │ place   │        16 │ 133021232232220102…  │
 │ 106e9793-4d86-45a4…  │ POINT (142.2134436…  │ … │ place   │        16 │ 133021232232220102…  │
+│ 2e6fe019-9d7f-44e9…  │ POINT (142.2134482…  │ … │ place   │        16 │ 133021232232220102…  │
+│ 7a2c6d46-21b1-4890…  │ POINT (142.2134436…  │ … │ place   │        16 │ 133021232232220102…  │
 │ 6a945985-22c8-4878…  │ POINT (142.2134401…  │ … │ place   │        16 │ 133021232232220102…  │
+│ 03cabf3e-da29-4f2c…  │ POINT (142.2134436…  │ … │ place   │        16 │ 133021232232220102…  │
+│ d44b8317-61fa-4d38…  │ POINT (142.2134436…  │ … │ place   │        16 │ 133021232232220102…  │
+│ 8478dc5f-41cd-4bfd…  │ POINT (142.213444 …  │ … │ place   │        16 │ 133021232232220102…  │
+│ 7ae2a2e0-3c39-4899…  │ POINT (138.515625 …  │ … │ place   │        16 │ 133022321222222222…  │
 │ 7c9bdaa3-c9dc-49b4…  │ POINT (142.1574032…  │ … │ place   │        16 │ 133023010203031233…  │
-│ 820ac51f-3c10-4632…  │ POINT (142.1603296…  │ … │ place   │        16 │ 133023010203031301…  │
 │ a05bdfc6-002f-4674…  │ POINT (142.1603083…  │ … │ place   │        16 │ 133023010203031301…  │
-│ 228260e9-34c3-4b50…  │ POINT (142.1603606…  │ … │ place   │        16 │ 133023010203031310…  │
+│ 820ac51f-3c10-4632…  │ POINT (142.1603296…  │ … │ place   │        16 │ 133023010203031301…  │
 │ 82eb8087-8f15-4e08…  │ POINT (142.1603517…  │ … │ place   │        16 │ 133023010203031310…  │
+│ 228260e9-34c3-4b50…  │ POINT (142.1603606…  │ … │ place   │        16 │ 133023010203031310…  │
 │ 3fd3ec70-8b17-4115…  │ POINT (142.1603727…  │ … │ place   │        16 │ 133023010203031310…  │
+│ 5e188374-8cc9-4709…  │ POINT (141.317 24.8) │ … │ place   │        16 │ 133023022311310313…  │
+│ c9d7e4e5-fa43-43f7…  │ POINT (141.317 24.8) │ … │ place   │        16 │ 133023022311310313…  │
+│ 16af51c8-40c3-48d6…  │ POINT (141.317 24.8) │ … │ place   │        16 │ 133023022311310313…  │
+│ 4fa488a0-601b-43a7…  │ POINT (141.317 24.8) │ … │ place   │        16 │ 133023022311310313…  │
 ├──────────────────────┴──────────────────────┴───┴─────────┴───────────┴──────────────────────┤
-│ 3193408 rows (3.19 million rows, 40 shown)                              21 columns (5 shown) │
+│ 3252680 rows (3.25 million rows, 40 shown)                              21 columns (5 shown) │
 └──────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -143,9 +143,9 @@ As you can see:
 Then, we can obtain features in area of interest like below:
 
 ```sql
--- DuckDB example
+-- DuckDB example: retrieve all features in one tile
 SELECT * FROM 'example.pyramid.parquet'
-  WHERE zoomlevel = 10
+  WHERE zoomlevel <= 10
     AND quadkey LIKE '133002110%'
 ```
 
@@ -168,6 +168,7 @@ Density based clustering approach is used. Generally, at lower zoom we don't nee
 
 - Since creating a tileset exclusively for streaming is painful, it is better to support streaming directly from one original file.
 - Contents of lower zoom tiles are wasted when higher zoom levels are shown. Then same feature repeatedly appears in larger zoom levels.
+- MapboxVectorTiles is lossy format.
 
 ## Refenrences
 
