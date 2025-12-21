@@ -30,7 +30,7 @@ uv run main.py -h
 
 <details><summary>Example: loading raw parquet (sorted only by spatially)</summary>
 
-https://github.com/user-attachments/assets/4e7a61f2-eb78-4658-a55f-8de31e2796c9
+<https://github.com/user-attachments/assets/4e7a61f2-eb78-4658-a55f-8de31e2796c9>
 
 Well sorted spatially but it takes too much time to obtain overview of entire dataset.
 
@@ -168,11 +168,6 @@ Density based clustering approach is used. Generally, at lower zoom we don't nee
 
 - Since creating a tileset exclusively for streaming is painful, it is better to support streaming directly from one original file.
 - Contents of lower zoom tiles are wasted when higher zoom levels are shown. Then same feature repeatedly appears in larger zoom levels.
-
-## License
-
-TBD
-Currently, it is not permitted license.
 
 ## Refenrences
 
