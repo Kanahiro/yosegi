@@ -24,6 +24,12 @@ uv run main.py -h
 - Overview of entire data can be obtained quickly.
 - Unlike GeoTIFF, lower resolution data are not repeadted because it is vector.
 
+https://github.com/user-attachments/assets/4df86816-559d-4b34-b57a-2f3d4b8bd14c
+*QGIS: read Pyramid parquet on Amazon S3*
+
+https://github.com/user-attachments/assets/26e2f662-474b-4d11-ab56-f73587ef8b2e
+*Browser: load same parquet and rendered with GeoArrowScatterPlotLayer*
+
 #### Structure
 
 Original:
@@ -133,15 +139,15 @@ SELECT * FROM yosegi
     AND quadkey LIKE '133002110%'
 ```
 
-### How calculate zoomlevel?
-
-Density based clustering approach is used. Generally, at lower zoom we don't need to show all features. By this approach, only essential features for visualization are kept at lower zoomlevels. Repeating this process from minzoom to maxzoom, we can get which features are visible at each zoomlevel.
-
 ### Benefits
 
 - Single Parquet can be used for storing data and streaming.
 - We can get overview of entire data quickly much faster than by only ordinary spatial sort like quadkey or Hilbert curve.
 - Thanks to very efficient pushdown filtering by zoomlevel and quadkey, we can read partial content of large Parquet file quickly.
+
+### How calculate zoomlevel?
+
+Density based clustering approach is used. Generally, at lower zoom we don't need to show all features. By this approach, only essential features for visualization are kept at lower zoomlevels. Repeating this process from minzoom to maxzoom, we can get which features are visible at each zoomlevel.
 
 ### Why quadkey?
 
