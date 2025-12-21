@@ -144,7 +144,7 @@ Then, we can obtain features in area of interest like below:
 
 ```sql
 -- DuckDB example
-SELECT * FROM yosegi
+SELECT * FROM 'example.pyramid.parquet'
   WHERE zoomlevel = 10
     AND quadkey LIKE '133002110%'
 ```
