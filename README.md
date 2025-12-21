@@ -28,6 +28,10 @@ uv run main.py -h
 
 *QGIS: read Pyramid parquet on Amazon S3. Blue to Red means zoomlevel*
 
+<details><summary>Example: loading raw parquet (sorted only by spatially)</summary><div>
+
+</div></details>
+
 <https://github.com/user-attachments/assets/26e2f662-474b-4d11-ab56-f73587ef8b2e>
 
 *Browser(DeckGL + DuckDB): load same parquet and rendered with [GeoArrowScatterPlotLayer](https://github.com/geoarrow/deck.gl-layers)*
@@ -165,3 +169,9 @@ Density based clustering approach is used. Generally, at lower zoom we don't nee
 
 TBD
 Currently, it is not permitted license.
+
+## Refenrences
+
+- <https://medium.com/radiant-earth-insights/using-duckdbs-hilbert-function-with-geop-8ebc9137fb8a>
+- <https://medium.com/radiant-earth-insights/the-admin-partitioned-geoparquet-distribution-59f0ca1c6d96>
+- <https://github.com/felt/tippecanoe>

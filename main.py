@@ -115,11 +115,11 @@ def process(args: Args):
     )
     SELECT
         b.* EXCLUDE (_uid, _rep_geom),
-        f.zoomlevel,
+        COALESCE(f.zoomlevel, (SELECT max(level) FROM precision_levels)) AS zoomlevel,
         ST_Quadkey(b.{geometry_column}, 23) AS quadkey
     FROM base AS b
-    JOIN first_wins AS f USING (_uid)
-    ORDER BY f.zoomlevel, quadkey
+    LEFT JOIN first_wins AS f USING (_uid)
+    ORDER BY zoomlevel, quadkey
     ) TO '{args.output_file}' (FORMAT PARQUET, ROW_GROUP_SIZE {args.parquet_row_group_size});
     """)
 
