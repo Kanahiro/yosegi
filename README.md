@@ -24,11 +24,11 @@ uv run main.py -h
 - Overview of entire data can be obtained quickly.
 - Unlike GeoTIFF, lower resolution data are not repeadted because it is vector.
 
-https://github.com/user-attachments/assets/4df86816-559d-4b34-b57a-2f3d4b8bd14c
+<https://github.com/user-attachments/assets/4df86816-559d-4b34-b57a-2f3d4b8bd14c>
 
-*QGIS: read Pyramid parquet on Amazon S3*
+*QGIS: read Pyramid parquet on Amazon S3. Blue to Red means zoomlevel*
 
-https://github.com/user-attachments/assets/26e2f662-474b-4d11-ab56-f73587ef8b2e
+<https://github.com/user-attachments/assets/26e2f662-474b-4d11-ab56-f73587ef8b2e>
 
 *Browser: load same parquet and rendered with GeoArrowScatterPlotLayer*
 
@@ -129,8 +129,8 @@ Pyramid structure:
 
 As you can see:
 
-- Sorted by zoomlevel. Then, rows of each zoomlevel are stored sequentially.
-- Within each zoomlevel, sorted by quadkey. Then, spatially close features are stored sequentially.
+- Sorted by zoomlevel. Then, rows of one zoomlevel are stored sequentially.
+- Within each zoomlevel, sorted by quadkey. Then, spatially close features are stored sequentially in each resolution and this is efficient for reading tile-based area of interest.
 
 Then, we can obtain features in area of interest like below:
 
