@@ -22,7 +22,7 @@ uv run main.py -h
 **By these steps, generate Pyramid-structure in a single Parquet file, just like GeoTIFF pyramid.**
 
 - Like GeoTIFF, overview of entire data can be obtained quickly.
-- Unlike GeoTIFF, lower resolution data are not repeadted because this is vector.
+- Unlike GeoTIFF, lower resolution data are not repeated because this is vector.
 
 <https://github.com/user-attachments/assets/4df86816-559d-4b34-b57a-2f3d4b8bd14c>
 
@@ -170,7 +170,7 @@ Density based clustering approach is used. Generally, at lower zoom we don't nee
 - Contents of lower zoom tiles are wasted when higher zoom levels are shown. Then same feature repeatedly appears in larger zoom levels.
 - MapboxVectorTiles is lossy format.
 
-## Refenrences
+## References
 
 - <https://medium.com/radiant-earth-insights/using-duckdbs-hilbert-function-with-geop-8ebc9137fb8a>
 - <https://medium.com/radiant-earth-insights/the-admin-partitioned-geoparquet-distribution-59f0ca1c6d96>
