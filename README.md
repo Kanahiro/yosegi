@@ -32,6 +32,8 @@ uv run main.py -h
 
 https://github.com/user-attachments/assets/4e7a61f2-eb78-4658-a55f-8de31e2796c9
 
+Well sorted spatially but it takes too much time to obtain overview of entire dataset.
+
 </details>
 
 <https://github.com/user-attachments/assets/26e2f662-474b-4d11-ab56-f73587ef8b2e>
