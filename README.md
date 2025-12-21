@@ -30,7 +30,7 @@ uv run main.py -h
 
 <https://github.com/user-attachments/assets/26e2f662-474b-4d11-ab56-f73587ef8b2e>
 
-*Browser: load same parquet and rendered with GeoArrowScatterPlotLayer*
+*Browser(DeckGL + DuckDB): load same parquet and rendered with [GeoArrowScatterPlotLayer](https://github.com/geoarrow/deck.gl-layers)*
 
 #### Structure
 
