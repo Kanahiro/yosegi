@@ -149,6 +149,13 @@ SELECT * FROM 'example.pyramid.parquet'
     AND quadkey LIKE '133002110%'
 ```
 
+### Example
+
+<https://dmsd2c92bdh54.cloudfront.net/index.html>
+
+- DeckGL + GeoArrowScatterPlotLayer + DuckDB
+  - Query Parquet with DuckDB and pass results to GeoArrowScatterPlotLayer
+
 ### Benefits
 
 - Single Parquet can be used for storing data and streaming.
