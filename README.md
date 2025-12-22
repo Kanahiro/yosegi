@@ -24,19 +24,19 @@ uv run main.py -h
 - Like GeoTIFF, overview of entire data can be obtained quickly.
 - Unlike GeoTIFF, lower resolution data are not repeated because this is vector.
 
-<https://github.com/user-attachments/assets/4df86816-559d-4b34-b57a-2f3d4b8bd14c>
+https://github.com/user-attachments/assets/4df86816-559d-4b34-b57a-2f3d4b8bd14c
 
 *QGIS: read Pyramid parquet on Amazon S3. Blue to Red means zoomlevel. Data: OvertureMaps*
 
 <details><summary>Example: loading raw parquet (sorted only by spatially)</summary>
 
-<https://github.com/user-attachments/assets/4e7a61f2-eb78-4658-a55f-8de31e2796c9>
+https://github.com/user-attachments/assets/4e7a61f2-eb78-4658-a55f-8de31e2796c9
 
 Well sorted spatially but it takes too much time to obtain overview of entire dataset.
 
 </details>
 
-<https://github.com/user-attachments/assets/26e2f662-474b-4d11-ab56-f73587ef8b2e>
+https://github.com/user-attachments/assets/26e2f662-474b-4d11-ab56-f73587ef8b2e
 
 *Browser(DeckGL + DuckDB): load same parquet and rendered with [GeoArrowScatterPlotLayer](https://github.com/geoarrow/deck.gl-layers)*
 
