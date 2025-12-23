@@ -17,8 +17,8 @@ uv run main.py input.shp output.pyramid.parquet # you can use GDAL/OGR formats
 Yosegi: Pyramid Parquet Generator
 
 positional arguments:
-  input_file            Path to the input Parquet file
-  output_file           Path to the output Yosegi file
+  input_file            Path to the input file
+  output_file           Path to the output file
 
 options:
   -h, --help            show this help message and exit
