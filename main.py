@@ -15,8 +15,8 @@ class Args:
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description="Yosegi: Pyramid Parquet Generator")
-    parser.add_argument("input_file", type=str, help="Path to the input Parquet file")
-    parser.add_argument("output_file", type=str, help="Path to the output Yosegi file")
+    parser.add_argument("input_file", type=str, help="Path to the input file")
+    parser.add_argument("output_file", type=str, help="Path to the output file")
     parser.add_argument("--minzoom", type=int, default=0, help="Minimum zoom level (default: 0)")
     parser.add_argument("--maxzoom", type=int, default=16, help="Maximum zoom level (default: 16)")
     parser.add_argument("--base-resolution", type=float, default=2.5, help="Base resolution (default: 2.5)")
