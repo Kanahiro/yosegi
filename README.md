@@ -54,8 +54,7 @@ options:
 #### QGIS: loading raw parquet (sorted only by spatially)
 
 <https://github.com/user-attachments/assets/4e7a61f2-eb78-4658-a55f-8de31e2796c9>
-
-Well sorted spatially but it takes too much time to obtain overview of entire dataset.
+*Well sorted spatially but it takes too much time to obtain overview of entire dataset.*
 
 #### Browser(DeckGL + DuckDB): load that parquet and rendere with [GeoArrowScatterPlotLayer](https://github.com/geoarrow/deck.gl-layers)
 
