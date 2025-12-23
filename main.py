@@ -11,6 +11,7 @@ class Args:
     base_resolution: float # heuristic
     geometry_column: str
     parquet_row_group_size: int
+    parquet_partition_by_zoomlevel: bool = False
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description="Yosegi: Pyramid Parquet Generator")
@@ -18,9 +19,11 @@ def parse_arguments():
     parser.add_argument("output_file", type=str, help="Path to the output Yosegi file")
     parser.add_argument("--minzoom", type=int, default=0, help="Minimum zoom level (default: 0)")
     parser.add_argument("--maxzoom", type=int, default=16, help="Maximum zoom level (default: 16)")
-    parser.add_argument("--base-resolution", type=float, default=2.5, help="Base resolution (default: 0.08)")
-    parser.add_argument("--geometry-column", type=str, default="geometry", help="Geometry column name (default: geometry)")
+    parser.add_argument("--base-resolution", type=float, default=2.5, help="Base resolution (default: 2.5)")
+    parser.add_argument("--geometry-column", type=str, default="geometry", help="Geometry column name (optional)")
     parser.add_argument("--parquet-row-group-size", type=int, default=10240, help="Parquet row group size (default: 10000)")
+    parser.add_argument("--parquet-partition-by-zoomlevel", action="store_true", help="Enable Parquet partitioning by zoomlevel (default: False)")
+    
     args = parser.parse_args()
 
     return Args(
@@ -31,6 +34,7 @@ def parse_arguments():
         base_resolution=args.base_resolution,
         geometry_column=args.geometry_column,
         parquet_row_group_size=args.parquet_row_group_size,
+        parquet_partition_by_zoomlevel=args.parquet_partition_by_zoomlevel,
     )
 
 def _precision_clause(args: Args) -> str:
@@ -45,8 +49,7 @@ def _precision_clause(args: Args) -> str:
 def process(args: Args):
     conn = duckdb.connect()
 
-    conn.execute("INSTALL spatial;")
-    conn.execute("LOAD spatial;")
+    conn.execute("INSTALL spatial; LOAD spatial;")
 
     try:
         conn.execute(f"CREATE TABLE input_data AS SELECT * FROM ST_Read('{args.input_file}');")
@@ -63,6 +66,10 @@ def process(args: Args):
         geometry_column = geometry_columns[0]
     else:
         geometry_column = args.geometry_column if args.geometry_column in geometry_columns else geometry_columns[0]
+
+    partition_clause = ""
+    if args.parquet_partition_by_zoomlevel:
+        partition_clause = ", PARTITION_BY zoomlevel"
 
     conn.execute(f"""
     COPY (
@@ -120,7 +127,7 @@ def process(args: Args):
     FROM base AS b
     LEFT JOIN first_wins AS f USING (_uid)
     ORDER BY zoomlevel, quadkey
-    ) TO '{args.output_file}' (FORMAT PARQUET, ROW_GROUP_SIZE {args.parquet_row_group_size});
+    ) TO '{args.output_file}' (FORMAT PARQUET, ROW_GROUP_SIZE {args.parquet_row_group_size} {partition_clause});
     """)
 
     conn.close()

@@ -6,9 +6,32 @@ Yosegi is a tool to generate Pyramid (Geo)Parquet files - optimized for streamin
 
 ```bash
 uv sync
-uv run main.py input.parquet output.pyramid.parquet
+uv run main.py input.parquet output.pyramid.parquet # GeoParquet
+uv run main.py input.shp output.pyramid.parquet # you can use GDAL/OGR formats
+```
+
+```
 # other options are available
-uv run main.py -h
+# uv run main.py -h
+
+Yosegi: Pyramid Parquet Generator
+
+positional arguments:
+  input_file            Path to the input Parquet file
+  output_file           Path to the output Yosegi file
+
+options:
+  -h, --help            show this help message and exit
+  --minzoom MINZOOM     Minimum zoom level (default: 0)
+  --maxzoom MAXZOOM     Maximum zoom level (default: 16)
+  --base-resolution BASE_RESOLUTION
+                        Base resolution (default: 2.5)
+  --geometry-column GEOMETRY_COLUMN
+                        Geometry column name (optional)
+  --parquet-row-group-size PARQUET_ROW_GROUP_SIZE
+                        Parquet row group size (default: 10000)
+  --parquet-partition-by-zoomlevel
+                        Enable Parquet partitioning by zoomlevel (default: False)
 ```
 
 ## Overview of Pyramid (Geo)Parquet
@@ -24,19 +47,19 @@ uv run main.py -h
 - Like GeoTIFF, overview of entire data can be obtained quickly.
 - Unlike GeoTIFF, lower resolution data are not repeated because this is vector.
 
-https://github.com/user-attachments/assets/4df86816-559d-4b34-b57a-2f3d4b8bd14c
+<https://github.com/user-attachments/assets/4df86816-559d-4b34-b57a-2f3d4b8bd14c>
 
 *QGIS: read Pyramid parquet on Amazon S3. Blue to Red means zoomlevel. Data: OvertureMaps*
 
 <details><summary>Example: loading raw parquet (sorted only by spatially)</summary>
 
-https://github.com/user-attachments/assets/4e7a61f2-eb78-4658-a55f-8de31e2796c9
+<https://github.com/user-attachments/assets/4e7a61f2-eb78-4658-a55f-8de31e2796c9>
 
 Well sorted spatially but it takes too much time to obtain overview of entire dataset.
 
 </details>
 
-https://github.com/user-attachments/assets/26e2f662-474b-4d11-ab56-f73587ef8b2e
+<https://github.com/user-attachments/assets/26e2f662-474b-4d11-ab56-f73587ef8b2e>
 
 *Browser(DeckGL + DuckDB): load same parquet and rendered with [GeoArrowScatterPlotLayer](https://github.com/geoarrow/deck.gl-layers)*
 
