@@ -57,7 +57,7 @@ options:
 
 *Well sorted spatially but it takes too much time to obtain overview of entire dataset.*
 
-#### Browser(DeckGL + DuckDB): load that parquet and rendere with [GeoArrowScatterPlotLayer](https://github.com/geoarrow/deck.gl-layers)
+#### Browser(DeckGL + DuckDB): load that parquet and render with [GeoArrowScatterPlotLayer](https://github.com/geoarrow/deck.gl-layers)
 
 <https://github.com/user-attachments/assets/26e2f662-474b-4d11-ab56-f73587ef8b2e>
 
