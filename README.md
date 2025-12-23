@@ -29,7 +29,7 @@ options:
   --geometry-column GEOMETRY_COLUMN
                         Geometry column name (optional)
   --parquet-row-group-size PARQUET_ROW_GROUP_SIZE
-                        Parquet row group size (default: 10000)
+                        Parquet row group size (default: 10240)
   --parquet-partition-by-zoomlevel
                         Enable Parquet partitioning by zoomlevel (default: False)
 ```

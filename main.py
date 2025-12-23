@@ -21,7 +21,7 @@ def parse_arguments():
     parser.add_argument("--maxzoom", type=int, default=16, help="Maximum zoom level (default: 16)")
     parser.add_argument("--base-resolution", type=float, default=2.5, help="Base resolution (default: 2.5)")
     parser.add_argument("--geometry-column", type=str, default="geometry", help="Geometry column name (optional)")
-    parser.add_argument("--parquet-row-group-size", type=int, default=10240, help="Parquet row group size (default: 10000)")
+    parser.add_argument("--parquet-row-group-size", type=int, default=10240, help="Parquet row group size (default: 10240)")
     parser.add_argument("--parquet-partition-by-zoomlevel", action="store_true", help="Enable Parquet partitioning by zoomlevel (default: False)")
     
     args = parser.parse_args()
