@@ -5,14 +5,13 @@ Yosegi is a tool to generate Pyramid (Geo)Parquet files - optimized for streamin
 ## Usage
 
 ```bash
-uv sync
-uv run main.py input.parquet output.pyramid.parquet # GeoParquet
-uv run main.py input.shp output.pyramid.parquet # you can use GDAL/OGR formats
+pip install yosegi
+yosegi input.parquet output.pyramid.parquet # GeoParquet
+yosegi input.shp output.pyramid.parquet # you can use GDAL/OGR formats
 ```
 
 ```
-# other options are available
-# uv run main.py -h
+# yosegi -h
 
 Yosegi: Pyramid Parquet Generator
 
