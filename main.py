@@ -1,6 +1,8 @@
-import duckdb
 import argparse
 from dataclasses import dataclass
+
+import duckdb
+
 
 @dataclass
 class Args:
@@ -8,22 +10,46 @@ class Args:
     output_file: str
     minzoom: int
     maxzoom: int
-    base_resolution: float # heuristic
+    base_resolution: float  # heuristic
     geometry_column: str
     parquet_row_group_size: int
     parquet_partition_by_zoomlevel: bool = False
+
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description="Yosegi: Pyramid Parquet Generator")
     parser.add_argument("input_file", type=str, help="Path to the input file")
     parser.add_argument("output_file", type=str, help="Path to the output file")
-    parser.add_argument("--minzoom", type=int, default=0, help="Minimum zoom level (default: 0)")
-    parser.add_argument("--maxzoom", type=int, default=16, help="Maximum zoom level (default: 16)")
-    parser.add_argument("--base-resolution", type=float, default=2.5, help="Base resolution (default: 2.5)")
-    parser.add_argument("--geometry-column", type=str, default="geometry", help="Geometry column name (optional)")
-    parser.add_argument("--parquet-row-group-size", type=int, default=10240, help="Parquet row group size (default: 10240)")
-    parser.add_argument("--parquet-partition-by-zoomlevel", action="store_true", help="Enable Parquet partitioning by zoomlevel (default: False)")
-    
+    parser.add_argument(
+        "--minzoom", type=int, default=0, help="Minimum zoom level (default: 0)"
+    )
+    parser.add_argument(
+        "--maxzoom", type=int, default=16, help="Maximum zoom level (default: 16)"
+    )
+    parser.add_argument(
+        "--base-resolution",
+        type=float,
+        default=2.5,
+        help="Base resolution (default: 2.5)",
+    )
+    parser.add_argument(
+        "--geometry-column",
+        type=str,
+        default="geometry",
+        help="Geometry column name (optional)",
+    )
+    parser.add_argument(
+        "--parquet-row-group-size",
+        type=int,
+        default=10240,
+        help="Parquet row group size (default: 10240)",
+    )
+    parser.add_argument(
+        "--parquet-partition-by-zoomlevel",
+        action="store_true",
+        help="Enable Parquet partitioning by zoomlevel (default: False)",
+    )
+
     args = parser.parse_args()
 
     return Args(
@@ -36,14 +62,6 @@ def parse_arguments():
         parquet_row_group_size=args.parquet_row_group_size,
         parquet_partition_by_zoomlevel=args.parquet_partition_by_zoomlevel,
     )
-
-def _precision_clause(args: Args) -> str:
-    clauses = []
-    for zoom in range(args.minzoom, args.maxzoom + 1):
-        prec = args.base_resolution / (2 ** zoom)
-        is_finest = "true" if zoom == args.maxzoom else "false"
-        clauses.append(f"({zoom}, {prec}::double precision, {is_finest})")
-    return ",\n".join(clauses)
 
 
 def process(args: Args):
@@ -69,17 +87,8 @@ def process(args: Args):
         raise ValueError("No geometry column found")
 
     geom_col = (
-        args.geometry_column
-        if args.geometry_column in geom_cols
-        else geom_cols[0]
+        args.geometry_column if args.geometry_column in geom_cols else geom_cols[0]
     )
-
-    geometry_type = conn.execute(f"""
-        SELECT upper(ST_GeometryType({geom_col})::varchar) AS geom_type
-        FROM input_data
-        WHERE {geom_col} IS NOT NULL
-        LIMIT 1;
-    """).fetchone()[0]
 
     # ---- base table (deterministic uid) ----
     conn.execute(f"""
@@ -110,7 +119,7 @@ def process(args: Args):
 
     # ---- zoom loop ----
     for z in range(args.minzoom, args.maxzoom):
-        prec = args.base_resolution / (2 ** z)
+        prec = args.base_resolution / (2**z)
 
         conn.execute(f"""
             INSERT INTO assigned
@@ -129,9 +138,7 @@ def process(args: Args):
               AND a.zoomlevel = {z};
         """)
 
-        remaining = conn.execute(
-            "SELECT COUNT(*) FROM unassigned"
-        ).fetchone()[0]
+        remaining = conn.execute("SELECT COUNT(*) FROM unassigned").fetchone()[0]
 
         if remaining == 0:
             break
@@ -145,9 +152,7 @@ def process(args: Args):
 
     # ---- final output ----
     partition_clause = (
-        ", PARTITION_BY zoomlevel"
-        if args.parquet_partition_by_zoomlevel
-        else ""
+        ", PARTITION_BY zoomlevel" if args.parquet_partition_by_zoomlevel else ""
     )
 
     conn.execute(f"""
@@ -167,7 +172,6 @@ def process(args: Args):
     """)
 
     conn.close()
-
 
 
 def main():
