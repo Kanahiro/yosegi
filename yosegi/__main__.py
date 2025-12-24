@@ -146,9 +146,8 @@ def process(args: Args):
               AND a.zoomlevel = {z};
         """)
 
-        remaining = conn.execute("SELECT COUNT(*) FROM unassigned").fetchone()[0]
-
-        if remaining == 0:
+        remaining = conn.execute("SELECT COUNT(*) FROM unassigned").fetchone()
+        if remaining is not None and remaining[0] == 0:
             break
 
     # ---- leftovers go to maxzoom ----
