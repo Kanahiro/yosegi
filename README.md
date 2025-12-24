@@ -198,6 +198,12 @@ Density based clustering approach is used. Generally, at lower zoom we don't nee
 - Contents of lower zoom tiles are wasted when higher zoom levels are shown. Then same feature repeatedly appears in larger zoom levels.
 - MapboxVectorTiles is lossy format.
 
+## Why not FlatGeobuf?
+
+- FlatGeobuf is also oriented to single file storage and streaming. However it has no pyramid structure, then:
+  - Overview of entire data cannot be obtained quickly.
+  - Tile-based area of interest query is not efficient (in the case of high density dataset, too many features may include in one tile.)
+
 ## References
 
 - <https://medium.com/radiant-earth-insights/using-duckdbs-hilbert-function-with-geop-8ebc9137fb8a>
