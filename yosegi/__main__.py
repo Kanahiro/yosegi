@@ -10,7 +10,8 @@ class Args:
     output_file: str
     minzoom: int
     maxzoom: int
-    base_resolution: float  # heuristic
+    resolution_base: float
+    resolution_multiplier: float
     geometry_column: str
     parquet_row_group_size: int
     parquet_partition_by_zoomlevel: bool = False
@@ -27,10 +28,16 @@ def parse_arguments():
         "--maxzoom", type=int, default=16, help="Maximum zoom level (default: 16)"
     )
     parser.add_argument(
-        "--base-resolution",
+        "--resolution-base",
         type=float,
         default=2.5,
         help="Base resolution (default: 2.5)",
+    )
+    parser.add_argument(
+        "--resolution-multiplier",
+        type=float,
+        default=2.0,
+        help="Resolution multiplier (default: 2.0). Larger is more precise. When set to 2.0, zoom=0 resolution / 2.0 = zoom=1 resolution.",
     )
     parser.add_argument(
         "--geometry-column",
@@ -57,7 +64,8 @@ def parse_arguments():
         output_file=args.output_file,
         minzoom=args.minzoom,
         maxzoom=args.maxzoom,
-        base_resolution=args.base_resolution,
+        resolution_base=args.resolution_base,
+        resolution_multiplier=args.resolution_multiplier,
         geometry_column=args.geometry_column,
         parquet_row_group_size=args.parquet_row_group_size,
         parquet_partition_by_zoomlevel=args.parquet_partition_by_zoomlevel,
@@ -95,9 +103,9 @@ def process(args: Args):
         CREATE TABLE base AS
         SELECT
             *,
-            row_number() OVER (ORDER BY hash(ST_AsWKB({geom_col}))) AS _uid,
+            row_number() OVER () AS _uid,
             CASE
-                WHEN upper(ST_GeometryType({geom_col})::varchar) LIKE '%POINT%'
+                WHEN upper(ST_GeometryType({geom_col})::varchar) LIKE '%POINT'
                     THEN {geom_col}
                 ELSE ST_PointOnSurface({geom_col})
             END AS _rep_geom
@@ -119,7 +127,7 @@ def process(args: Args):
 
     # ---- zoom loop ----
     for z in range(args.minzoom, args.maxzoom):
-        prec = args.base_resolution / (2**z)
+        prec = args.resolution_base / (args.resolution_multiplier**z)
 
         conn.execute(f"""
             INSERT INTO assigned

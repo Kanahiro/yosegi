@@ -1,7 +1,7 @@
 [project]
 name = "yosegi"
 version = "0.1.0"
-description = "Add your description here"
+description = "Pyramid (Geo)Parquet Generator"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
@@ -14,3 +14,14 @@ dev = [
     "ruff>=0.14.10",
     "ty>=0.0.1a35",
 ]
+
+[project.scripts]
+yosegi = "yosegi.__main__:main"
+
+[build-system]
+requires = ["uv_build>=0.9.9,<0.10.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "yosegi"
+module-root = ""
