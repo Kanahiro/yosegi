@@ -48,86 +48,122 @@ def _precision_clause(args: Args) -> str:
 
 def process(args: Args):
     conn = duckdb.connect()
-
     conn.execute("INSTALL spatial; LOAD spatial;")
 
+    # ---- input ----
     try:
-        conn.execute(f"CREATE TABLE input_data AS SELECT * FROM ST_Read('{args.input_file}');")
-    except duckdb.IOException as e:
-        # try read_parquet
-        conn.execute(f"CREATE TABLE input_data AS SELECT * FROM read_parquet('{args.input_file}');")
-    
-    columns = conn.execute("PRAGMA table_info('input_data');").fetchall()
+        conn.execute(f"""
+            CREATE TABLE input_data AS
+            SELECT * FROM ST_Read('{args.input_file}');
+        """)
+    except duckdb.IOException:
+        conn.execute(f"""
+            CREATE TABLE input_data AS
+            SELECT * FROM read_parquet('{args.input_file}');
+        """)
 
-    geometry_columns = [col[1] for col in columns if col[2] == 'GEOMETRY']
-    if not geometry_columns:
-        raise ValueError("No geometry column found in the input data.")
-    if len(geometry_columns) == 1:
-        geometry_column = geometry_columns[0]
-    else:
-        geometry_column = args.geometry_column if args.geometry_column in geometry_columns else geometry_columns[0]
+    # ---- geometry column detection ----
+    cols = conn.execute("PRAGMA table_info('input_data');").fetchall()
+    geom_cols = [c[1] for c in cols if c[2] == "GEOMETRY"]
+    if not geom_cols:
+        raise ValueError("No geometry column found")
 
-    partition_clause = ""
-    if args.parquet_partition_by_zoomlevel:
-        partition_clause = ", PARTITION_BY zoomlevel"
+    geom_col = (
+        args.geometry_column
+        if args.geometry_column in geom_cols
+        else geom_cols[0]
+    )
+
+    geometry_type = conn.execute(f"""
+        SELECT upper(ST_GeometryType({geom_col})::varchar) AS geom_type
+        FROM input_data
+        WHERE {geom_col} IS NOT NULL
+        LIMIT 1;
+    """).fetchone()[0]
+
+    # ---- base table (deterministic uid) ----
+    conn.execute(f"""
+        CREATE TABLE base AS
+        SELECT
+            *,
+            row_number() OVER (ORDER BY hash(ST_AsWKB({geom_col}))) AS _uid,
+            CASE
+                WHEN upper(ST_GeometryType({geom_col})::varchar) LIKE '%POINT%'
+                    THEN {geom_col}
+                ELSE ST_PointOnSurface({geom_col})
+            END AS _rep_geom
+        FROM input_data;
+    """)
+
+    # ---- working tables ----
+    conn.execute("""
+        CREATE TABLE unassigned AS
+        SELECT _uid, _rep_geom FROM base;
+    """)
+
+    conn.execute("""
+        CREATE TABLE assigned (
+            _uid BIGINT PRIMARY KEY,
+            zoomlevel INTEGER
+        );
+    """)
+
+    # ---- zoom loop ----
+    for z in range(args.minzoom, args.maxzoom):
+        prec = args.base_resolution / (2 ** z)
+
+        conn.execute(f"""
+            INSERT INTO assigned
+            SELECT u._uid, {z} AS zoomlevel
+            FROM unassigned u
+            QUALIFY row_number() OVER (
+                PARTITION BY ST_ReducePrecision(u._rep_geom, {prec})
+                ORDER BY u._uid
+            ) = 1;
+        """)
+
+        conn.execute(f"""
+            DELETE FROM unassigned
+            USING assigned a
+            WHERE unassigned._uid = a._uid
+              AND a.zoomlevel = {z};
+        """)
+
+        remaining = conn.execute(
+            "SELECT COUNT(*) FROM unassigned"
+        ).fetchone()[0]
+
+        if remaining == 0:
+            break
+
+    # ---- leftovers go to maxzoom ----
+    conn.execute(f"""
+        INSERT INTO assigned
+        SELECT _uid, {args.maxzoom}
+        FROM unassigned;
+    """)
+
+    # ---- final output ----
+    partition_clause = (
+        ", PARTITION_BY zoomlevel"
+        if args.parquet_partition_by_zoomlevel
+        else ""
+    )
 
     conn.execute(f"""
-    COPY (
-    WITH
-    base AS (
-        SELECT
-            i.*,
-            row_number() OVER () AS _uid,
-            CASE
-                WHEN upper(CAST(ST_GeometryType(i.{geometry_column}) AS VARCHAR)) LIKE '%POINT%'
-                    THEN i.{geometry_column}
-                ELSE ST_PointOnSurface(i.{geometry_column})
-            END AS _rep_geom
-        FROM input_data AS i
-    ),
-    precision_levels AS (
-        SELECT * FROM (
-            VALUES
-                {_precision_clause(args)}
-        ) AS x(level, prec, is_finest)
-    ),
-    candidates AS (
-        SELECT
-            t._uid,
-            t.level,
-            t.geom_for_dedup,
-            row_number() OVER (
-                PARTITION BY t.level, t.geom_for_dedup
-                ORDER BY t._uid
-            ) AS rn
-        FROM (
+        COPY (
             SELECT
-                b._uid,
-                l.level,
-                CASE
-                    WHEN l.is_finest THEN b._rep_geom
-                    ELSE ST_ReducePrecision(b._rep_geom, l.prec)
-                END AS geom_for_dedup
-            FROM base AS b
-            CROSS JOIN precision_levels AS l
-        ) AS t
-    ),
-    first_wins AS (
-        SELECT
-            _uid,
-            MIN(level) AS zoomlevel
-        FROM candidates
-        WHERE rn = 1
-        GROUP BY _uid
-    )
-    SELECT
-        b.* EXCLUDE (_uid, _rep_geom),
-        COALESCE(f.zoomlevel, (SELECT max(level) FROM precision_levels)) AS zoomlevel,
-        ST_Quadkey(b.{geometry_column}, 23) AS quadkey
-    FROM base AS b
-    LEFT JOIN first_wins AS f USING (_uid)
-    ORDER BY zoomlevel, quadkey
-    ) TO '{args.output_file}' (FORMAT PARQUET, ROW_GROUP_SIZE {args.parquet_row_group_size} {partition_clause});
+                b.* EXCLUDE (_rep_geom, _uid),
+                a.zoomlevel,
+                ST_Quadkey(b._rep_geom, {args.maxzoom}) AS quadkey
+            FROM base b
+            JOIN assigned a USING (_uid)
+            ORDER BY zoomlevel, quadkey
+        )
+        TO '{args.output_file}'
+        (FORMAT PARQUET,
+         ROW_GROUP_SIZE {args.parquet_row_group_size}
+         {partition_clause});
     """)
 
     conn.close()
