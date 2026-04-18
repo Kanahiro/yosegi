@@ -23,14 +23,15 @@ options:
   -h, --help            show this help message and exit
   --minzoom MINZOOM     Minimum zoom level (default: 0)
   --maxzoom MAXZOOM     Maximum zoom level (default: 16)
-  --base-resolution BASE_RESOLUTION
+  --resolution-base RESOLUTION_BASE
                         Base resolution (default: 2.5)
+  --resolution-multiplier RESOLUTION_MULTIPLIER
+                        Resolution multiplier (default: 2.0)
   --geometry-column GEOMETRY_COLUMN
                         Geometry column name (optional)
   --parquet-row-group-size PARQUET_ROW_GROUP_SIZE
                         Parquet row group size (default: 10240)
-  --parquet-partition-by-zoomlevel
-                        Enable Parquet partitioning by zoomlevel (default: False)
+  --sort-by SORT_BY     Sort key for feature thinning (default: hash(_uid), i.e. random)
 ```
 
 ## Overview of Pyramid (Geo)Parquet

@@ -1,6 +1,7 @@
 import argparse
 import json
 import math
+import sys
 from dataclasses import dataclass
 
 import duckdb
@@ -18,8 +19,12 @@ class Args:
     resolution_multiplier: float
     geometry_column: str
     parquet_row_group_size: int
-    parquet_partition_by_zoomlevel: bool = False
     sort_by: str | None = None
+
+
+def _sql_escape(value: str) -> str:
+    """シングルクォートをエスケープしてSQL文字列リテラルに安全に埋め込む"""
+    return value.replace("'", "''")
 
 
 def parse_arguments() -> Args:
@@ -57,11 +62,6 @@ def parse_arguments() -> Args:
         help="Parquet row group size (default: 10240)",
     )
     parser.add_argument(
-        "--parquet-partition-by-zoomlevel",
-        action="store_true",
-        help="Enable Parquet partitioning by zoomlevel (default: False)",
-    )
-    parser.add_argument(
         "--sort-by",
         type=str,
         default=None,
@@ -79,14 +79,19 @@ def parse_arguments() -> Args:
         resolution_multiplier=args.resolution_multiplier,
         geometry_column=args.geometry_column,
         parquet_row_group_size=args.parquet_row_group_size,
-        parquet_partition_by_zoomlevel=args.parquet_partition_by_zoomlevel,
         sort_by=args.sort_by,
     )
 
 
-def build_output_query(geom_col: str, maxzoom: int, zoomlevel_filter: int | None = None) -> str:
+def build_output_query(
+    geom_col: str, maxzoom: int, zoomlevel_filter: int | None = None
+) -> str:
     """出力クエリを生成"""
-    where_clause = f"WHERE a.zoomlevel = {zoomlevel_filter}" if zoomlevel_filter is not None else ""
+    where_clause = (
+        f"WHERE a.zoomlevel = {zoomlevel_filter}"
+        if zoomlevel_filter is not None
+        else ""
+    )
     return f"""
         SELECT
             b.* EXCLUDE (_rep_geom, _uid, {geom_col}),
@@ -179,18 +184,21 @@ def process(args: Args) -> None:
     conn.execute("INSTALL spatial; LOAD spatial;")
 
     # 入力ファイル読み込み（GDAL形式を優先、失敗したらParquet）
+    safe_input = _sql_escape(args.input_file)
     try:
-        input_query = f"SELECT * FROM ST_Read('{args.input_file}')"
+        input_query = f"SELECT * FROM ST_Read('{safe_input}')"
         conn.execute(f"SELECT 1 FROM ({input_query}) LIMIT 1")
     except duckdb.IOException:
-        input_query = f"SELECT * FROM read_parquet('{args.input_file}')"
+        input_query = f"SELECT * FROM read_parquet('{safe_input}')"
 
     # geometry column検出
     cols = conn.execute(f"DESCRIBE ({input_query})").fetchall()
     geom_cols = [c[0] for c in cols if c[1] == "GEOMETRY"]
     if not geom_cols:
         raise ValueError("No geometry column found")
-    geom_col = args.geometry_column if args.geometry_column in geom_cols else geom_cols[0]
+    geom_col = (
+        args.geometry_column if args.geometry_column in geom_cols else geom_cols[0]
+    )
 
     # baseテーブル作成（入力データ + _uid + _rep_geom）
     conn.execute(f"""
@@ -214,9 +222,11 @@ def process(args: Args) -> None:
         );
     """)
 
+    total_count = conn.execute("SELECT COUNT(*) FROM base").fetchone()[0]  # type: ignore[index]
+
     # zoomlevelループ: 各zoomで代表点を1つ選んでassign
     for z in range(args.minzoom, args.maxzoom):
-        prec = args.resolution_base / (args.resolution_multiplier ** z)
+        prec = args.resolution_base / (args.resolution_multiplier**z)
         # タイル境界と整合する分割粒度を計算
         tile_size_x = 360.0 / (2**z)
         cells_per_tile_1d = tile_size_x / prec
@@ -229,19 +239,21 @@ def process(args: Args) -> None:
             WHERE NOT EXISTS (SELECT 1 FROM assigned a WHERE a._uid = b._uid)
             QUALIFY row_number() OVER (
                 PARTITION BY ST_Quadkey(b._rep_geom, {sub_zoom})
-                ORDER BY {args.sort_by if args.sort_by else 'hash(b._uid)'}
+                ORDER BY {args.sort_by if args.sort_by else "hash(b._uid)"}
             ) = 1;
         """)
 
         # 全て割り当て済みなら終了
-        unassigned_count = conn.execute("""
-            SELECT COUNT(*) FROM base b
-            WHERE NOT EXISTS (SELECT 1 FROM assigned a WHERE a._uid = b._uid)
-        """).fetchone()
-        if unassigned_count and unassigned_count[0] == 0:
+        assigned_count = conn.execute("SELECT COUNT(*) FROM assigned").fetchone()[0]  # type: ignore[index]
+        print(
+            f"  zoom {z}: {assigned_count}/{total_count} features assigned",
+            file=sys.stderr,
+        )
+        if assigned_count == total_count:
             break
 
     # 残りはmaxzoomに割り当て
+    print(f"  zoom {args.maxzoom} (remaining features)", file=sys.stderr)
     conn.execute(f"""
         INSERT INTO assigned
         SELECT b._uid, {args.maxzoom} AS zoomlevel
@@ -250,24 +262,9 @@ def process(args: Args) -> None:
     """)
 
     # 出力
-    if args.parquet_partition_by_zoomlevel:
-        conn.execute(f"""
-            COPY (
-                SELECT
-                    b.* EXCLUDE (_rep_geom, _uid),
-                    a.zoomlevel,
-                    ST_Quadkey(b._rep_geom, {args.maxzoom}) AS quadkey
-                FROM base b
-                JOIN assigned a USING (_uid)
-                ORDER BY zoomlevel, quadkey
-            )
-            TO '{args.output_file}'
-            (FORMAT PARQUET,
-             ROW_GROUP_SIZE {args.parquet_row_group_size},
-             PARTITION_BY zoomlevel);
-        """)
-    else:
-        write_geoparquet(conn, args, geom_col)
+    print("Writing GeoParquet...", file=sys.stderr)
+    write_geoparquet(conn, args, geom_col)
+    print(f"Done: {args.output_file}", file=sys.stderr)
 
     conn.close()
 
