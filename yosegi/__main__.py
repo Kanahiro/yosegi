@@ -1,5 +1,6 @@
 import argparse
 import json
+import math
 from dataclasses import dataclass
 
 import duckdb
@@ -18,6 +19,7 @@ class Args:
     geometry_column: str
     parquet_row_group_size: int
     parquet_partition_by_zoomlevel: bool = False
+    sort_by: str | None = None
 
 
 def parse_arguments() -> Args:
@@ -59,6 +61,12 @@ def parse_arguments() -> Args:
         action="store_true",
         help="Enable Parquet partitioning by zoomlevel (default: False)",
     )
+    parser.add_argument(
+        "--sort-by",
+        type=str,
+        default=None,
+        help="Sort key for feature thinning (default: hash(_uid), i.e. random)",
+    )
 
     args = parser.parse_args()
 
@@ -72,6 +80,7 @@ def parse_arguments() -> Args:
         geometry_column=args.geometry_column,
         parquet_row_group_size=args.parquet_row_group_size,
         parquet_partition_by_zoomlevel=args.parquet_partition_by_zoomlevel,
+        sort_by=args.sort_by,
     )
 
 
@@ -208,6 +217,10 @@ def process(args: Args) -> None:
     # zoomlevelループ: 各zoomで代表点を1つ選んでassign
     for z in range(args.minzoom, args.maxzoom):
         prec = args.resolution_base / (args.resolution_multiplier ** z)
+        # タイル境界と整合する分割粒度を計算
+        tile_size_x = 360.0 / (2**z)
+        cells_per_tile_1d = tile_size_x / prec
+        sub_zoom = z + max(1, round(math.log2(max(2.0, cells_per_tile_1d))))
 
         conn.execute(f"""
             INSERT INTO assigned
@@ -215,8 +228,8 @@ def process(args: Args) -> None:
             FROM base b
             WHERE NOT EXISTS (SELECT 1 FROM assigned a WHERE a._uid = b._uid)
             QUALIFY row_number() OVER (
-                PARTITION BY ST_ReducePrecision(b._rep_geom, {prec})
-                ORDER BY b._uid
+                PARTITION BY ST_Quadkey(b._rep_geom, {sub_zoom})
+                ORDER BY {args.sort_by if args.sort_by else 'hash(b._uid)'}
             ) = 1;
         """)
 
