@@ -1,19 +1,13 @@
 [project]
 name = "yosegi"
-version = "0.1.0"
+version = "0.2.0"
 description = "Pyramid (Geo)Parquet Generator"
 readme = "README.md"
 requires-python = ">=3.14"
-dependencies = [
-    "duckdb>=1.4.3",
-    "pyarrow>=15.0.0",
-]
+dependencies = ["duckdb>=1.4.3", "pyarrow>=15.0.0"]
 
 [dependency-groups]
-dev = [
-    "ruff>=0.14.10",
-    "ty>=0.0.1a35",
-]
+dev = ["ruff>=0.14.10", "ty>=0.0.1a35"]
 
 [project.scripts]
 yosegi = "yosegi.__main__:main"
