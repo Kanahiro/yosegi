@@ -122,12 +122,74 @@ _GEOMETRY_TYPE_MAP = {
 }
 
 
+def _split_at_quadkey_prefix(
+    table: pa.Table,
+    max_rows: int,
+    min_rows: int,
+    prefix_len: int,
+):
+    """tableをquadkey prefixの境界でスライスして yield する。
+
+    分割条件:
+    - rg_size >= max_rows: 強制分割
+    - prefix-1 が変化したら常に分割 (chunkがprefix-1を跨ぐのを防ぎ、各chunkを
+      ある親タイル内に閉じる)
+    - prefix-K (1 < K <= prefix_len) では rg_size >= threshold(K) のときのみ分割
+      これにより小さな深層バケットは隣接バケットと同じchunkにまとまる
+    """
+    n = table.num_rows
+    if n == 0:
+        return
+
+    quadkeys = table.column("quadkey").to_pylist()
+    coarse_threshold = max(1, min_rows // 4)
+    start = 0
+    for i in range(1, n):
+        rg_size = i - start
+        if rg_size >= max_rows:
+            yield table.slice(start, rg_size)
+            start = i
+            continue
+
+        a = quadkeys[i - 1]
+        b = quadkeys[i]
+        common = 0
+        for k in range(prefix_len):
+            if k >= len(a) or k >= len(b) or a[k] != b[k]:
+                break
+            common += 1
+        if common >= prefix_len:
+            continue
+
+        change_level = common + 1
+        if change_level == 1:
+            yield table.slice(start, rg_size)
+            start = i
+            continue
+
+        threshold = min_rows if change_level == prefix_len else coarse_threshold
+        if rg_size >= threshold:
+            yield table.slice(start, rg_size)
+            start = i
+
+    if start < n:
+        yield table.slice(start, n - start)
+
+
 def write_geoparquet(
     conn: duckdb.DuckDBPyConnection,
     args: Args,
     geom_col: str,
 ) -> None:
-    """GeoParquetを書き込む（最大サイズを超えない限り複数zoomlevelを1つのRow Groupに詰める）"""
+    """GeoParquetを書き込む。
+
+    RowGroup分割戦略:
+    - 全データを (zoomlevel, quadkey) でソート済み
+    - quadkey prefix-N の境界で RowGroup を切り、各 RG の quadkey min/max を
+      タイト化してプッシュダウン効率を上げる
+    - 低zoomは閾値到達せず自然に複数zoomがパックされる
+    - 高zoomは zl_count >= max_rows のとき先にflushして混在を防ぐ
+    """
 
     # スキーマ取得
     schema_query = build_output_query(geom_col, args.maxzoom) + " LIMIT 1"
@@ -181,45 +243,62 @@ def write_geoparquet(
     """).fetchall()
 
     max_rows = args.parquet_row_group_size
+    min_rows = max(1, max_rows // 4)
+    total_rows = sum(c for _, c in zoomlevels)
+
+    # 適応的prefix長: 4^P ≈ ceil(total_rows / max_rows) を満たす P
+    if total_rows > max_rows:
+        target_rgs = math.ceil(total_rows / max_rows)
+        prefix_len = max(1, min(args.maxzoom, math.ceil(math.log(target_rgs, 4))))
+    else:
+        prefix_len = 1
 
     with pq.ParquetWriter(args.output_file, schema) as writer:
         accumulated_tables: list[pa.Table] = []
         accumulated_rows = 0
+        current_zoom: int | None = None
 
-        for zoomlevel, zl_count in zoomlevels:
-            # このzoomlevelを追加すると最大を超える場合、先に書き出し
-            if accumulated_rows > 0 and accumulated_rows + zl_count > max_rows:
+        def flush() -> None:
+            nonlocal accumulated_tables, accumulated_rows, current_zoom
+            if accumulated_tables:
                 writer.write_table(pa.concat_tables(accumulated_tables))
                 accumulated_tables = []
                 accumulated_rows = 0
+                current_zoom = None
 
-            # このzoomlevelのデータを取得
+        for zoomlevel, zl_count in zoomlevels:
+            if zl_count == 0:
+                continue
+
+            # zl_count > max_rows のzoomは単独で複数RGに分かれる。低zoom由来の
+            # 蓄積をここでflushして、高zoomのRGに低zoomデータが混ざるのを防ぐ。
+            if zl_count > max_rows and accumulated_rows > 0:
+                flush()
+
             query = build_output_query(geom_col, args.maxzoom, zoomlevel)
             zl_table = conn.execute(query).fetch_arrow_table()
 
-            # 単体で最大を超える場合は分割
-            if zl_table.num_rows > max_rows:
-                if accumulated_tables:
-                    writer.write_table(pa.concat_tables(accumulated_tables))
-                    accumulated_tables = []
-                    accumulated_rows = 0
+            for chunk in _split_at_quadkey_prefix(
+                zl_table, max_rows, min_rows, prefix_len
+            ):
+                # 同一zoom内: prefix-1 alignmentを保つため、揃っていない場合flush。
+                # zoom境界では check をスキップ → 小さい低zoomは隣接zoomとパック。
+                if accumulated_tables and current_zoom == zoomlevel:
+                    acc_first = accumulated_tables[0].column("quadkey")[0].as_py()
+                    acc_last = accumulated_tables[-1].column("quadkey")[-1].as_py()
+                    new_first = chunk.column("quadkey")[0].as_py()
+                    if acc_first[:1] == acc_last[:1] and acc_first[:1] != new_first[:1]:
+                        flush()
 
-                offset = 0
-                while offset < zl_table.num_rows:
-                    chunk_size = min(max_rows, zl_table.num_rows - offset)
-                    chunk = zl_table.slice(offset, chunk_size)
-                    if chunk_size == max_rows:
-                        writer.write_table(chunk)
-                    else:
-                        accumulated_tables.append(chunk)
-                        accumulated_rows = chunk_size
-                    offset += chunk_size
-            else:
-                accumulated_tables.append(zl_table)
-                accumulated_rows += zl_table.num_rows
+                if accumulated_rows > 0 and accumulated_rows + chunk.num_rows > max_rows:
+                    flush()
+                accumulated_tables.append(chunk)
+                accumulated_rows += chunk.num_rows
+                current_zoom = zoomlevel
+                if accumulated_rows >= max_rows:
+                    flush()
 
-        if accumulated_tables:
-            writer.write_table(pa.concat_tables(accumulated_tables))
+        flush()
 
 
 def process(args: Args) -> None:
