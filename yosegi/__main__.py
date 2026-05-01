@@ -17,7 +17,7 @@ class Args:
     maxzoom: int
     resolution_base: float
     resolution_multiplier: float
-    geometry_column: str
+    geometry_column: str | None
     parquet_row_group_size: int
     sort_by: str | None = None
 
@@ -52,8 +52,8 @@ def parse_arguments() -> Args:
     parser.add_argument(
         "--geometry-column",
         type=str,
-        default="geometry",
-        help="Geometry column name (optional)",
+        default=None,
+        help="Geometry column name (auto-detected if not specified)",
     )
     parser.add_argument(
         "--parquet-row-group-size",
@@ -191,14 +191,15 @@ def process(args: Args) -> None:
     except duckdb.IOException:
         input_query = f"SELECT * FROM read_parquet('{safe_input}')"
 
-    # geometry column検出
-    cols = conn.execute(f"DESCRIBE ({input_query})").fetchall()
-    geom_cols = [c[0] for c in cols if c[1] == "GEOMETRY"]
-    if not geom_cols:
-        raise ValueError("No geometry column found")
-    geom_col = (
-        args.geometry_column if args.geometry_column in geom_cols else geom_cols[0]
-    )
+    # geometry column検出: 指定されていればそれを信用、未指定なら型名に "geometry" を含む列を採用
+    if args.geometry_column is not None:
+        geom_col = args.geometry_column
+    else:
+        cols = conn.execute(f"DESCRIBE ({input_query})").fetchall()
+        geom_cols = [c[0] for c in cols if "geometry" in c[1].lower()]
+        if not geom_cols:
+            raise ValueError("No geometry column found")
+        geom_col = geom_cols[0]
 
     # baseテーブル作成（入力データ + _uid + _rep_geom）
     conn.execute(f"""
