@@ -96,6 +96,12 @@ def build_output_query(
         SELECT
             b.* EXCLUDE (_rep_geom, _uid, {geom_col}),
             ST_AsWKB(b.{geom_col}) AS {geom_col},
+            {{
+                'xmin': ST_XMin(b.{geom_col}),
+                'ymin': ST_YMin(b.{geom_col}),
+                'xmax': ST_XMax(b.{geom_col}),
+                'ymax': ST_YMax(b.{geom_col})
+            }} AS bbox,
             a.zoomlevel,
             ST_Quadkey(b._rep_geom, {maxzoom}) AS quadkey
         FROM base b
@@ -103,6 +109,17 @@ def build_output_query(
         {where_clause}
         ORDER BY a.zoomlevel, quadkey
     """
+
+
+_GEOMETRY_TYPE_MAP = {
+    "POINT": "Point",
+    "LINESTRING": "LineString",
+    "POLYGON": "Polygon",
+    "MULTIPOINT": "MultiPoint",
+    "MULTILINESTRING": "MultiLineString",
+    "MULTIPOLYGON": "MultiPolygon",
+    "GEOMETRYCOLLECTION": "GeometryCollection",
+}
 
 
 def write_geoparquet(
@@ -116,16 +133,42 @@ def write_geoparquet(
     schema_query = build_output_query(geom_col, args.maxzoom) + " LIMIT 1"
     schema = conn.execute(schema_query).fetch_arrow_table().schema
 
-    # GeoParquetメタデータ設定
+    # 全体bboxとgeometry_typesを取得
+    bbox_row = conn.execute(f"""
+        SELECT
+            MIN(ST_XMin({geom_col})),
+            MIN(ST_YMin({geom_col})),
+            MAX(ST_XMax({geom_col})),
+            MAX(ST_YMax({geom_col}))
+        FROM base
+    """).fetchone()
+    geom_type_rows = conn.execute(f"""
+        SELECT DISTINCT ST_GeometryType({geom_col}) FROM base
+    """).fetchall()
+    geometry_types = sorted(
+        {_GEOMETRY_TYPE_MAP.get(r[0], r[0]) for r in geom_type_rows}
+    )
+
+    # GeoParquetメタデータ設定 (1.1.0 spec: covering / bbox / geometry_types)
+    column_metadata: dict = {
+        "encoding": "WKB",
+        "geometry_types": geometry_types,
+        "covering": {
+            "bbox": {
+                "xmin": ["bbox", "xmin"],
+                "ymin": ["bbox", "ymin"],
+                "xmax": ["bbox", "xmax"],
+                "ymax": ["bbox", "ymax"],
+            }
+        },
+    }
+    if bbox_row is not None and all(v is not None for v in bbox_row):
+        column_metadata["bbox"] = [float(v) for v in bbox_row]
+
     geo_metadata = {
         "version": "1.1.0",
         "primary_column": geom_col,
-        "columns": {
-            geom_col: {
-                "encoding": "WKB",
-                "geometry_types": [],
-            }
-        },
+        "columns": {geom_col: column_metadata},
     }
     schema = schema.with_metadata({b"geo": json.dumps(geo_metadata).encode("utf-8")})
 
