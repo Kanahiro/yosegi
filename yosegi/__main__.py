@@ -432,9 +432,11 @@ def process(args: Args) -> None:
     """)
 
     # assignedテーブル作成
+    # PRIMARY KEY は付けない: ユニーク性はアルゴリズム上保証されており、
+    # DuckDB は PK 制約付き INSERT をシリアル化するため並列度を下げる。
     conn.execute("""
         CREATE TABLE assigned (
-            _uid BIGINT PRIMARY KEY,
+            _uid BIGINT,
             zoomlevel INTEGER
         );
     """)
