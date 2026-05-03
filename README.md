@@ -31,7 +31,7 @@ options:
                         Geometry column name (optional)
   --parquet-row-group-size PARQUET_ROW_GROUP_SIZE
                         Parquet row group size (default: 10240)
-  --sort-by SORT_BY     Sort key for feature thinning (default: hash(_uid), i.e. random)
+  --sort-by SORT_BY     Sort key for feature thinning (default: ST_Area DESC for polygons, ST_Length DESC for lines, hash(_uid) otherwise)
 ```
 
 ## Overview of Pyramid (Geo)Parquet

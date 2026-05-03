@@ -91,7 +91,11 @@ def parse_arguments() -> Args:
         "--sort-by",
         type=str,
         default=None,
-        help="Sort key for feature thinning (default: hash(_uid), i.e. random)",
+        help=(
+            "Sort key for feature thinning "
+            "(default: ST_Area DESC for polygons, ST_Length DESC for lines, "
+            "hash(_uid) otherwise)"
+        ),
     )
 
     args = parser.parse_args()
@@ -224,6 +228,7 @@ def write_geoparquet(
     conn: duckdb.DuckDBPyConnection,
     args: Args,
     geom_col: str,
+    geometry_types_raw: set[str],
 ) -> None:
     """GeoParquetを書き込む。
 
@@ -241,7 +246,7 @@ def write_geoparquet(
     schema_query = build_output_query(geom_col, args.maxzoom) + " LIMIT 1"
     schema = conn.execute(schema_query).fetch_arrow_table().schema
 
-    # 全体bboxとgeometry_typesを取得
+    # 全体bboxを取得 (geometry_types は process() で取得済み)
     bbox_row = conn.execute(f"""
         SELECT
             MIN(ST_XMin({geom_col})),
@@ -250,11 +255,8 @@ def write_geoparquet(
             MAX(ST_YMax({geom_col}))
         FROM base
     """).fetchone()
-    geom_type_rows = conn.execute(f"""
-        SELECT DISTINCT ST_GeometryType({geom_col}) FROM base
-    """).fetchall()
     geometry_types = sorted(
-        {_GEOMETRY_TYPE_MAP.get(r[0], r[0]) for r in geom_type_rows}
+        {_GEOMETRY_TYPE_MAP.get(t, t) for t in geometry_types_raw}
     )
     _log(f"      geometry types: {', '.join(geometry_types) or '(none)'}")
     if bbox_row is not None and all(v is not None for v in bbox_row):
@@ -381,7 +383,7 @@ def process(args: Args) -> None:
     _log(f"Yosegi: {args.input_file} → {args.output_file}")
     _log(
         f"  zoom {args.minzoom}..{args.maxzoom}, row_group_size={args.parquet_row_group_size}, "
-        f"sort={args.sort_by or 'hash(_uid)'}"
+        f"sort={args.sort_by or 'auto'}"
     )
 
     conn = duckdb.connect()
@@ -443,6 +445,15 @@ def process(args: Args) -> None:
 
     total_count = conn.execute("SELECT COUNT(*) FROM base").fetchone()[0]  # type: ignore[index]
     _log(f"      features:       {_fmt_int(total_count)}")
+
+    # geometry 型は Phase 2 のデフォルト sort 決定と Phase 3 のメタデータで使うため
+    # ここで一度だけスキャンする
+    geometry_types_raw: set[str] = {
+        r[0]
+        for r in conn.execute(
+            f"SELECT DISTINCT ST_GeometryType({geom_col}) FROM base"
+        ).fetchall()
+    }
     _log(f"      elapsed:        {_fmt_secs(time.perf_counter() - phase_t0)}")
 
     # ===== Phase 2: zoom assignment =====
@@ -451,9 +462,27 @@ def process(args: Args) -> None:
 
     assigned_count = 0
 
+    # sort_by 未指定時は geometry 型から既定値を決める:
+    #   line 系のみ → ST_Length DESC (長い順)
+    #   polygon 系のみ → ST_Area DESC (大きい順)
+    #   それ以外 / 混在 → hash(_uid) (ランダム)
+    effective_sort_by = args.sort_by
+    if effective_sort_by is None:
+        if geometry_types_raw and geometry_types_raw <= {
+            "LINESTRING",
+            "MULTILINESTRING",
+        }:
+            effective_sort_by = f"ST_Length({geom_col}) DESC"
+        elif geometry_types_raw and geometry_types_raw <= {
+            "POLYGON",
+            "MULTIPOLYGON",
+        }:
+            effective_sort_by = f"ST_Area({geom_col}) DESC"
+    _log(f"      sort key:       {effective_sort_by or 'hash(_uid)'}")
+
     # sort_by の値を remaining に取り込み、ループ内での base への JOIN を回避する
-    if args.sort_by:
-        sort_expr, sort_direction = _split_sort_direction(args.sort_by)
+    if effective_sort_by:
+        sort_expr, sort_direction = _split_sort_direction(effective_sort_by)
         sort_select = f", ({sort_expr}) AS _sort_key"
         order_by = f"r._sort_key {sort_direction}".strip()
     else:
@@ -533,7 +562,7 @@ def process(args: Args) -> None:
     # ===== Phase 3: write =====
     _log("\n[3/3] Writing GeoParquet")
     phase_t0 = time.perf_counter()
-    write_geoparquet(conn, args, geom_col)
+    write_geoparquet(conn, args, geom_col, geometry_types_raw)
     _log(f"      elapsed:        {_fmt_secs(time.perf_counter() - phase_t0)}")
 
     conn.close()
