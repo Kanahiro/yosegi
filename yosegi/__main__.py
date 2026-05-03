@@ -5,7 +5,9 @@ import sys
 from dataclasses import dataclass
 
 import duckdb
+import numpy as np
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 
@@ -130,6 +132,27 @@ _GEOMETRY_TYPE_MAP = {
 }
 
 
+def _compute_quadkey_change_level(
+    quadkey_col: pa.ChunkedArray | pa.Array, prefix_len: int
+) -> np.ndarray:
+    """隣接 quadkey 間で先頭 prefix_len 文字内の最初の差異位置 + 1 を返す。
+
+    どこも違わない (prefix_len 文字すべて一致) 場合は prefix_len + 1。
+    quadkey は ST_Quadkey(_, maxzoom) により maxzoom 文字に揃っており
+    prefix_len <= maxzoom なので、各 prefix は固定長 prefix_len バイトとなる。
+    """
+    prefix = pc.utf8_slice_codeunits(quadkey_col, 0, prefix_len)  # ty: ignore[unresolved-attribute]
+    if isinstance(prefix, pa.ChunkedArray):
+        prefix = prefix.combine_chunks()
+    n = len(prefix)
+    data = np.frombuffer(prefix.buffers()[2], dtype=np.uint8, count=n * prefix_len)
+    byte_arr = data.reshape(n, prefix_len)
+    diff = byte_arr[1:] != byte_arr[:-1]
+    any_diff = diff.any(axis=1)
+    first_diff = diff.argmax(axis=1)
+    return np.where(any_diff, first_diff + 1, prefix_len + 1)
+
+
 def _split_at_quadkey_prefix(
     table: pa.Table,
     max_rows: int,
@@ -148,8 +171,12 @@ def _split_at_quadkey_prefix(
     n = table.num_rows
     if n == 0:
         return
+    if n == 1:
+        yield table
+        return
 
-    quadkeys = table.column("quadkey").to_pylist()
+    change_level = _compute_quadkey_change_level(table.column("quadkey"), prefix_len)
+
     coarse_threshold = max(1, min_rows // 4)
     start = 0
     for i in range(1, n):
@@ -159,23 +186,16 @@ def _split_at_quadkey_prefix(
             start = i
             continue
 
-        a = quadkeys[i - 1]
-        b = quadkeys[i]
-        common = 0
-        for k in range(prefix_len):
-            if k >= len(a) or k >= len(b) or a[k] != b[k]:
-                break
-            common += 1
-        if common >= prefix_len:
+        cl = int(change_level[i - 1])
+        if cl > prefix_len:
             continue
 
-        change_level = common + 1
-        if change_level == 1:
+        if cl == 1:
             yield table.slice(start, rg_size)
             start = i
             continue
 
-        threshold = min_rows if change_level == prefix_len else coarse_threshold
+        threshold = min_rows if cl == prefix_len else coarse_threshold
         if rg_size >= threshold:
             yield table.slice(start, rg_size)
             start = i
@@ -298,7 +318,10 @@ def write_geoparquet(
                     if acc_first[:1] == acc_last[:1] and acc_first[:1] != new_first[:1]:
                         flush()
 
-                if accumulated_rows > 0 and accumulated_rows + chunk.num_rows > max_rows:
+                if (
+                    accumulated_rows > 0
+                    and accumulated_rows + chunk.num_rows > max_rows
+                ):
                     flush()
                 accumulated_tables.append(chunk)
                 accumulated_rows += chunk.num_rows
