@@ -2,6 +2,7 @@ import argparse
 import json
 import math
 import sys
+import time
 from dataclasses import dataclass
 
 import duckdb
@@ -9,6 +10,21 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
+
+
+def _log(msg: str = "") -> None:
+    print(msg, file=sys.stderr, flush=True)
+
+
+def _fmt_secs(s: float) -> str:
+    if s < 60:
+        return f"{s:.2f}s"
+    m = int(s // 60)
+    return f"{m}m {s - m * 60:.1f}s"
+
+
+def _fmt_int(n: int) -> str:
+    return f"{n:,}"
 
 
 @dataclass
@@ -219,6 +235,8 @@ def write_geoparquet(
     - 高zoomは zl_count >= max_rows のとき先にflushして混在を防ぐ
     """
 
+    _log("      scanning schema / bbox / geometry types...")
+
     # スキーマ取得
     schema_query = build_output_query(geom_col, args.maxzoom) + " LIMIT 1"
     schema = conn.execute(schema_query).fetch_arrow_table().schema
@@ -238,6 +256,12 @@ def write_geoparquet(
     geometry_types = sorted(
         {_GEOMETRY_TYPE_MAP.get(r[0], r[0]) for r in geom_type_rows}
     )
+    _log(f"      geometry types: {', '.join(geometry_types) or '(none)'}")
+    if bbox_row is not None and all(v is not None for v in bbox_row):
+        bx = [float(v) for v in bbox_row]
+        _log(
+            f"      bbox:           [{bx[0]:.4f}, {bx[1]:.4f}, {bx[2]:.4f}, {bx[3]:.4f}]"
+        )
 
     # GeoParquetメタデータ設定 (1.1.0 spec: covering / bbox / geometry_types)
     column_metadata: dict = {
@@ -281,18 +305,28 @@ def write_geoparquet(
     else:
         prefix_len = 1
 
+    _log(f"      total rows:     {_fmt_int(total_rows)}")
+    _log(
+        f"      row groups:     target ≈ {math.ceil(total_rows / max_rows)} "
+        f"(max_rows={max_rows}, prefix_len={prefix_len})"
+    )
+    _log("      writing row groups per zoom...")
+
+    rg_count = 0
+
     with pq.ParquetWriter(args.output_file, schema) as writer:
         accumulated_tables: list[pa.Table] = []
         accumulated_rows = 0
         current_zoom: int | None = None
 
         def flush() -> None:
-            nonlocal accumulated_tables, accumulated_rows, current_zoom
+            nonlocal accumulated_tables, accumulated_rows, current_zoom, rg_count
             if accumulated_tables:
                 writer.write_table(pa.concat_tables(accumulated_tables))
                 accumulated_tables = []
                 accumulated_rows = 0
                 current_zoom = None
+                rg_count += 1
 
         for zoomlevel, zl_count in zoomlevels:
             if zl_count == 0:
@@ -302,6 +336,9 @@ def write_geoparquet(
             # 蓄積をここでflushして、高zoomのRGに低zoomデータが混ざるのを防ぐ。
             if zl_count > max_rows and accumulated_rows > 0:
                 flush()
+
+            zoom_t0 = time.perf_counter()
+            zoom_rg_start = rg_count
 
             query = build_output_query(geom_col, args.maxzoom, zoomlevel)
             zl_table = conn.execute(query).fetch_arrow_table()
@@ -329,30 +366,55 @@ def write_geoparquet(
                 if accumulated_rows >= max_rows:
                     flush()
 
+            zoom_rgs_written = rg_count - zoom_rg_start
+            _log(
+                f"        zoom {zoomlevel:>2}: {_fmt_int(zl_count):>14} rows, "
+                f"{zoom_rgs_written:>4} RG flushed  ({_fmt_secs(time.perf_counter() - zoom_t0)})"
+            )
+
         flush()
+    _log(f"      row groups written: {rg_count}")
 
 
 def process(args: Args) -> None:
+    total_t0 = time.perf_counter()
+    _log(f"Yosegi: {args.input_file} → {args.output_file}")
+    _log(
+        f"  zoom {args.minzoom}..{args.maxzoom}, row_group_size={args.parquet_row_group_size}, "
+        f"sort={args.sort_by or 'hash(_uid)'}"
+    )
+
     conn = duckdb.connect()
     conn.execute("INSTALL spatial; LOAD spatial;")
+
+    # ===== Phase 1: input load =====
+    _log("\n[1/3] Loading input")
+    phase_t0 = time.perf_counter()
 
     # 入力ファイル読み込み（GDAL形式を優先、失敗したらParquet）
     safe_input = _sql_escape(args.input_file)
     try:
         input_query = f"SELECT * FROM ST_Read('{safe_input}')"
         conn.execute(f"SELECT 1 FROM ({input_query}) LIMIT 1")
+        input_format = "GDAL/OGR (ST_Read)"
     except duckdb.IOException:
         input_query = f"SELECT * FROM read_parquet('{safe_input}')"
+        input_format = "Parquet (read_parquet)"
+    _log(f"      format:         {input_format}")
 
     # geometry column検出: 指定されていればそれを信用、未指定なら型名に "geometry" を含む列を採用
     if args.geometry_column is not None:
         geom_col = args.geometry_column
+        _log(f"      geometry col:   {geom_col} (specified)")
     else:
         cols = conn.execute(f"DESCRIBE ({input_query})").fetchall()
         geom_cols = [c[0] for c in cols if "geometry" in c[1].lower()]
         if not geom_cols:
             raise ValueError("No geometry column found")
         geom_col = geom_cols[0]
+        _log(f"      geometry col:   {geom_col} (auto-detected)")
+
+    _log("      building base table (with representative points)...")
 
     # baseテーブル作成（入力データ + _uid + _rep_geom）
     conn.execute(f"""
@@ -377,6 +439,13 @@ def process(args: Args) -> None:
     """)
 
     total_count = conn.execute("SELECT COUNT(*) FROM base").fetchone()[0]  # type: ignore[index]
+    _log(f"      features:       {_fmt_int(total_count)}")
+    _log(f"      elapsed:        {_fmt_secs(time.perf_counter() - phase_t0)}")
+
+    # ===== Phase 2: zoom assignment =====
+    _log(f"\n[2/3] Assigning zoom levels ({args.minzoom}..{args.maxzoom})")
+    phase_t0 = time.perf_counter()
+
     assigned_count = 0
 
     # sort_by の値を remaining に取り込み、ループ内での base への JOIN を回避する
@@ -397,6 +466,7 @@ def process(args: Args) -> None:
 
     # zoomlevelループ: 各zoomで代表点を1つ選んでassign
     for z in range(args.minzoom, args.maxzoom):
+        zoom_t0 = time.perf_counter()
         prec = args.resolution_base / (args.resolution_multiplier**z)
         # タイル境界と整合する分割粒度を計算
         tile_size_x = 360.0 / (2**z)
@@ -431,29 +501,43 @@ def process(args: Args) -> None:
 
         conn.execute("DROP TABLE newly_assigned;")
 
-        # 全て割り当て済みなら終了
         assigned_count += newly_assigned_count
-        print(
-            f"  zoom {z}: {assigned_count}/{total_count} features assigned",
-            file=sys.stderr,
+        pct = 100.0 * assigned_count / total_count if total_count else 0.0
+        _log(
+            f"      zoom {z:>2}: +{_fmt_int(newly_assigned_count):>12} → "
+            f"{_fmt_int(assigned_count):>14} / {_fmt_int(total_count)} "
+            f"({pct:5.1f}%)  ({_fmt_secs(time.perf_counter() - zoom_t0)})"
         )
         if assigned_count == total_count:
             break
 
     # 残りはmaxzoomに割り当て
-    print(f"  zoom {args.maxzoom} (remaining features)", file=sys.stderr)
-    conn.execute(f"""
-        INSERT INTO assigned
-        SELECT _uid, {args.maxzoom} AS zoomlevel
-        FROM remaining;
-    """)
+    remaining_count = total_count - assigned_count
+    if remaining_count > 0:
+        zoom_t0 = time.perf_counter()
+        conn.execute(f"""
+            INSERT INTO assigned
+            SELECT _uid, {args.maxzoom} AS zoomlevel
+            FROM remaining;
+        """)
+        _log(
+            f"      zoom {args.maxzoom:>2}: +{_fmt_int(remaining_count):>12} → "
+            f"{_fmt_int(total_count):>14} / {_fmt_int(total_count)} "
+            f"(100.0%)  ({_fmt_secs(time.perf_counter() - zoom_t0)}) [remaining]"
+        )
+    _log(f"      elapsed:        {_fmt_secs(time.perf_counter() - phase_t0)}")
 
-    # 出力
-    print("Writing GeoParquet...", file=sys.stderr)
+    # ===== Phase 3: write =====
+    _log("\n[3/3] Writing GeoParquet")
+    phase_t0 = time.perf_counter()
     write_geoparquet(conn, args, geom_col)
-    print(f"Done: {args.output_file}", file=sys.stderr)
+    _log(f"      elapsed:        {_fmt_secs(time.perf_counter() - phase_t0)}")
 
     conn.close()
+
+    _log(
+        f"\nDone: {args.output_file} (total {_fmt_secs(time.perf_counter() - total_t0)})"
+    )
 
 
 def main() -> None:
