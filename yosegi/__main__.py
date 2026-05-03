@@ -27,6 +27,14 @@ def _sql_escape(value: str) -> str:
     return value.replace("'", "''")
 
 
+def _split_sort_direction(sort_by: str) -> tuple[str, str]:
+    """sort_by から末尾の ASC/DESC を切り離して (式, 方向) を返す"""
+    parts = sort_by.strip().rsplit(maxsplit=1)
+    if len(parts) == 2 and parts[1].upper() in ("ASC", "DESC"):
+        return parts[0], parts[1].upper()
+    return sort_by.strip(), ""
+
+
 def parse_arguments() -> Args:
     parser = argparse.ArgumentParser(description="Yosegi: Pyramid Parquet Generator")
     parser.add_argument("input_file", type=str, help="Path to the input file")
@@ -346,6 +354,23 @@ def process(args: Args) -> None:
     """)
 
     total_count = conn.execute("SELECT COUNT(*) FROM base").fetchone()[0]  # type: ignore[index]
+    assigned_count = 0
+
+    # sort_by の値を remaining に取り込み、ループ内での base への JOIN を回避する
+    if args.sort_by:
+        sort_expr, sort_direction = _split_sort_direction(args.sort_by)
+        sort_select = f", ({sort_expr}) AS _sort_key"
+        order_by = f"r._sort_key {sort_direction}".strip()
+    else:
+        sort_select = ""
+        order_by = "hash(r._uid)"
+
+    # 未割り当てfeatureだけを保持し、zoomごとの反復でbase全体を再走査しない
+    conn.execute(f"""
+        CREATE TEMP TABLE remaining AS
+        SELECT _uid, _rep_geom{sort_select}
+        FROM base;
+    """)
 
     # zoomlevelループ: 各zoomで代表点を1つ選んでassign
     for z in range(args.minzoom, args.maxzoom):
@@ -356,18 +381,35 @@ def process(args: Args) -> None:
         sub_zoom = z + max(1, round(math.log2(max(2.0, cells_per_tile_1d))))
 
         conn.execute(f"""
-            INSERT INTO assigned
-            SELECT b._uid, {z} AS zoomlevel
-            FROM base b
-            WHERE NOT EXISTS (SELECT 1 FROM assigned a WHERE a._uid = b._uid)
+            CREATE TEMP TABLE newly_assigned AS
+            SELECT r._uid, {z} AS zoomlevel
+            FROM remaining r
             QUALIFY row_number() OVER (
-                PARTITION BY ST_Quadkey(b._rep_geom, {sub_zoom})
-                ORDER BY {args.sort_by if args.sort_by else "hash(b._uid)"}
+                PARTITION BY ST_Quadkey(r._rep_geom, {sub_zoom})
+                ORDER BY {order_by}
             ) = 1;
         """)
 
+        newly_assigned_count = conn.execute(
+            "SELECT COUNT(*) FROM newly_assigned"
+        ).fetchone()[0]  # type: ignore[index]
+
+        conn.execute("""
+            INSERT INTO assigned
+            SELECT _uid, zoomlevel
+            FROM newly_assigned;
+        """)
+
+        conn.execute("""
+            DELETE FROM remaining
+            USING newly_assigned
+            WHERE remaining._uid = newly_assigned._uid;
+        """)
+
+        conn.execute("DROP TABLE newly_assigned;")
+
         # 全て割り当て済みなら終了
-        assigned_count = conn.execute("SELECT COUNT(*) FROM assigned").fetchone()[0]  # type: ignore[index]
+        assigned_count += newly_assigned_count
         print(
             f"  zoom {z}: {assigned_count}/{total_count} features assigned",
             file=sys.stderr,
@@ -379,9 +421,8 @@ def process(args: Args) -> None:
     print(f"  zoom {args.maxzoom} (remaining features)", file=sys.stderr)
     conn.execute(f"""
         INSERT INTO assigned
-        SELECT b._uid, {args.maxzoom} AS zoomlevel
-        FROM base b
-        WHERE NOT EXISTS (SELECT 1 FROM assigned a WHERE a._uid = b._uid);
+        SELECT _uid, {args.maxzoom} AS zoomlevel
+        FROM remaining;
     """)
 
     # 出力
