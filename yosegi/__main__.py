@@ -120,7 +120,7 @@ def build_output_query(
     )
     return f"""
         SELECT
-            b.* EXCLUDE (_rep_geom, _uid, {geom_col}),
+            b.* EXCLUDE (_rep_geom, {geom_col}),
             ST_AsWKB(b.{geom_col}) AS {geom_col},
             {{
                 'xmin': ST_XMin(b.{geom_col}),
@@ -131,7 +131,7 @@ def build_output_query(
             a.zoomlevel,
             ST_Quadkey(b._rep_geom, {maxzoom}) AS quadkey
         FROM base b
-        JOIN assigned a USING (_uid)
+        JOIN assigned a ON b.rowid = a._uid
         {where_clause}
         ORDER BY a.zoomlevel, quadkey
     """
@@ -416,12 +416,13 @@ def process(args: Args) -> None:
 
     _log("      building base table (with representative points)...")
 
-    # baseテーブル作成（入力データ + _uid + _rep_geom）
+    # baseテーブル作成（入力データ + _rep_geom）
+    # _uid は base.rowid を後段で参照することで代用し、row_number() OVER () による
+    # シングルスレッド実行を回避する。
     conn.execute(f"""
         CREATE TABLE base AS
         SELECT
             *,
-            row_number() OVER () AS _uid,
             CASE
                 WHEN ST_GeometryType({geom_col}) IN ('POINT', 'MULTIPOINT')
                     THEN {geom_col}
@@ -431,9 +432,11 @@ def process(args: Args) -> None:
     """)
 
     # assignedテーブル作成
+    # PRIMARY KEY は付けない: ユニーク性はアルゴリズム上保証されており、
+    # DuckDB は PK 制約付き INSERT をシリアル化するため並列度を下げる。
     conn.execute("""
         CREATE TABLE assigned (
-            _uid BIGINT PRIMARY KEY,
+            _uid BIGINT,
             zoomlevel INTEGER
         );
     """)
@@ -460,7 +463,7 @@ def process(args: Args) -> None:
     # 未割り当てfeatureだけを保持し、zoomごとの反復でbase全体を再走査しない
     conn.execute(f"""
         CREATE TEMP TABLE remaining AS
-        SELECT _uid, _rep_geom{sort_select}
+        SELECT rowid AS _uid, _rep_geom{sort_select}
         FROM base;
     """)
 
