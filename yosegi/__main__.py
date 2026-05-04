@@ -100,6 +100,15 @@ def parse_arguments() -> Args:
 
     args = parser.parse_args()
 
+    # ST_Quadkey の level は 1..23 のみ受け付ける
+    if not 1 <= args.maxzoom <= 23:
+        parser.error(f"--maxzoom must be in [1, 23], got {args.maxzoom}")
+    if not 0 <= args.minzoom < args.maxzoom:
+        parser.error(
+            f"--minzoom must satisfy 0 <= minzoom < maxzoom, "
+            f"got minzoom={args.minzoom}, maxzoom={args.maxzoom}"
+        )
+
     return Args(
         input_file=args.input_file,
         output_file=args.output_file,
@@ -421,12 +430,14 @@ def process(args: Args) -> None:
     # baseテーブル作成（入力データ + _rep_geom）
     # _uid は base.rowid を後段で参照することで代用し、row_number() OVER () による
     # シングルスレッド実行を回避する。
+    # _rep_geom は常に POINT であることを保証する (ST_X/ST_Y で参照するため)。
+    # ST_PointOnSurface は POINT に対しては恒等的、MULTIPOINT/LINE/POLYGON は POINT を返す。
     conn.execute(f"""
         CREATE TABLE base AS
         SELECT
             *,
             CASE
-                WHEN ST_GeometryType({geom_col}) IN ('POINT', 'MULTIPOINT')
+                WHEN ST_GeometryType({geom_col}) = 'POINT'
                     THEN {geom_col}
                 ELSE ST_PointOnSurface({geom_col})
             END AS _rep_geom
@@ -500,17 +511,15 @@ def process(args: Args) -> None:
     for z in range(args.minzoom, args.maxzoom):
         zoom_t0 = time.perf_counter()
         prec = args.resolution_base / (args.resolution_multiplier**z)
-        # タイル境界と整合する分割粒度を計算
-        tile_size_x = 360.0 / (2**z)
-        cells_per_tile_1d = tile_size_x / prec
-        sub_zoom = z + max(1, round(math.log2(max(2.0, cells_per_tile_1d))))
-
+        # prec 度刻みの度空間グリッドで代表featureを 1 つ選ぶ。
         conn.execute(f"""
             CREATE TEMP TABLE newly_assigned AS
             SELECT r._uid, {z} AS zoomlevel
             FROM remaining r
             QUALIFY row_number() OVER (
-                PARTITION BY ST_Quadkey(r._rep_geom, {sub_zoom})
+                PARTITION BY
+                    floor(ST_X(r._rep_geom) / {prec}),
+                    floor(ST_Y(r._rep_geom) / {prec})
                 ORDER BY {order_by}
             ) = 1;
         """)
