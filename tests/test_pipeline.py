@@ -16,6 +16,7 @@ def _make_args(input_file: Path, output_file: Path, **overrides) -> Args:
         geometry_column=None,
         parquet_row_group_size=overrides.pop("parquet_row_group_size", 10240),
         sort_by=overrides.pop("sort_by", None),
+        min_visible_size_factor=overrides.pop("min_visible_size_factor", 1.0),
     )
 
 
@@ -93,3 +94,58 @@ def test_output_is_sorted_by_zoom_then_quadkey(
         prev = (zooms[i - 1], quadkeys[i - 1])
         curr = (zooms[i], quadkeys[i])
         assert prev <= curr, f"row {i} is out of order: {prev} > {curr}"
+
+
+def test_size_factor_filters_small_polygons_at_low_zoom(
+    polygons_parquet: Path, tmp_path: Path
+) -> None:
+    """Polygons whose bbox is smaller than resolution(z) * factor must not
+    be placed at zoom z."""
+    out = tmp_path / "out.parquet"
+    process(_make_args(polygons_parquet, out, min_visible_size_factor=1.0))
+    t = pq.read_table(out)
+    bboxes = t["bbox"].to_pylist()
+    zooms = t["zoomlevel"].to_pylist()
+    resolution_base = 2.5
+    multiplier = 2.0
+    maxzoom = 6
+    for z, b in zip(zooms, bboxes):
+        if z == maxzoom:
+            continue
+        prec = resolution_base / (multiplier**z)
+        size = max(b["xmax"] - b["xmin"], b["ymax"] - b["ymin"])
+        assert size + 1e-12 >= prec, (
+            f"polygon with size={size} should not appear at zoom {z} "
+            f"(threshold={prec})"
+        )
+
+
+def test_size_factor_zero_disables_filter(
+    polygons_parquet: Path, tmp_path: Path
+) -> None:
+    """factor=0 should let small polygons appear at any zoom (preserving
+    pre-filter behavior)."""
+    out = tmp_path / "out.parquet"
+    process(_make_args(polygons_parquet, out, min_visible_size_factor=0.0))
+    t = pq.read_table(out)
+    assert t.num_rows == 2000
+
+
+def test_size_factor_pushes_filtered_to_maxzoom(
+    polygons_parquet: Path, tmp_path: Path
+) -> None:
+    """All features must still be present in output; small ones get pushed
+    to maxzoom by the residual assignment."""
+    out_filtered = tmp_path / "filtered.parquet"
+    out_unfiltered = tmp_path / "unfiltered.parquet"
+    process(_make_args(polygons_parquet, out_filtered, min_visible_size_factor=1.0))
+    process(_make_args(polygons_parquet, out_unfiltered, min_visible_size_factor=0.0))
+    t_f = pq.read_table(out_filtered)
+    t_u = pq.read_table(out_unfiltered)
+    assert t_f.num_rows == t_u.num_rows == 2000
+    # filtered run should have at least as many rows at maxzoom (small
+    # features are pushed there) as the unfiltered run.
+    maxzoom = 6
+    f_max = sum(1 for z in t_f["zoomlevel"].to_pylist() if z == maxzoom)
+    u_max = sum(1 for z in t_u["zoomlevel"].to_pylist() if z == maxzoom)
+    assert f_max >= u_max

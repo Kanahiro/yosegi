@@ -38,6 +38,7 @@ class Args:
     geometry_column: str | None
     parquet_row_group_size: int
     sort_by: str | None = None
+    min_visible_size_factor: float = 1.0
 
 
 def _sql_escape(value: str) -> str:
@@ -97,6 +98,17 @@ def parse_arguments() -> Args:
             "hash(_uid) otherwise)"
         ),
     )
+    parser.add_argument(
+        "--min-visible-size-factor",
+        type=float,
+        default=1.0,
+        help=(
+            "Skip features at low zoom whose bbox is smaller than the grid "
+            "resolution times this factor. A feature is eligible at zoom z "
+            "only if max(bbox_width, bbox_height) >= resolution(z) * factor. "
+            "Set to 0 to disable filtering (default: 1.0)"
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -107,6 +119,11 @@ def parse_arguments() -> Args:
         parser.error(
             f"--minzoom must satisfy 0 <= minzoom < maxzoom, "
             f"got minzoom={args.minzoom}, maxzoom={args.maxzoom}"
+        )
+    if args.min_visible_size_factor < 0:
+        parser.error(
+            f"--min-visible-size-factor must be >= 0, "
+            f"got {args.min_visible_size_factor}"
         )
 
     return Args(
@@ -119,6 +136,7 @@ def parse_arguments() -> Args:
         geometry_column=args.geometry_column,
         parquet_row_group_size=args.parquet_row_group_size,
         sort_by=args.sort_by,
+        min_visible_size_factor=args.min_visible_size_factor,
     )
 
 
@@ -133,7 +151,7 @@ def build_output_query(
     )
     return f"""
         SELECT
-            b.* EXCLUDE (_rep_geom, {geom_col}),
+            b.* EXCLUDE (_rep_geom, _min_visible_zoom, {geom_col}),
             ST_AsWKB(b.{geom_col}) AS {geom_col},
             {{
                 'xmin': ST_XMin(b.{geom_col}),
@@ -427,11 +445,44 @@ def process(args: Args) -> None:
 
     _log("      building base table (with representative points)...")
 
-    # baseテーブル作成（入力データ + _rep_geom）
+    # baseテーブル作成（入力データ + _rep_geom + _min_visible_zoom）
     # _uid は base.rowid を後段で参照することで代用し、row_number() OVER () による
     # シングルスレッド実行を回避する。
     # _rep_geom は常に POINT であることを保証する (ST_X/ST_Y で参照するため)。
     # ST_PointOnSurface は POINT に対しては恒等的、MULTIPOINT/LINE/POLYGON は POINT を返す。
+    # _min_visible_zoom: bbox の最大辺長が resolution(z) * factor 以上になる最小 z。
+    # factor==0 のときはフィルタを無効化するため minzoom を入れる。
+    factor = args.min_visible_size_factor
+    if factor > 0:
+        # threshold(z) = resolution_base * factor / multiplier^z
+        # eligible at z iff size >= threshold(z)
+        #   => z >= log_multiplier(resolution_base * factor / size)
+        size_expr = (
+            f"GREATEST("
+            f"ST_XMax({geom_col}) - ST_XMin({geom_col}), "
+            f"ST_YMax({geom_col}) - ST_YMin({geom_col})"
+            f")"
+        )
+        threshold_at_z0 = args.resolution_base * factor
+        min_visible_zoom_expr = f"""
+            CASE
+                WHEN {size_expr} <= 0 THEN {args.minzoom}
+                WHEN {size_expr} >= {threshold_at_z0} THEN {args.minzoom}
+                ELSE GREATEST(
+                    {args.minzoom},
+                    LEAST(
+                        {args.maxzoom},
+                        CAST(CEIL(
+                            LN({threshold_at_z0} / {size_expr})
+                            / LN({args.resolution_multiplier})
+                        ) AS INTEGER)
+                    )
+                )
+            END
+        """
+    else:
+        min_visible_zoom_expr = f"{args.minzoom}"
+
     conn.execute(f"""
         CREATE TABLE base AS
         SELECT
@@ -440,7 +491,8 @@ def process(args: Args) -> None:
                 WHEN ST_GeometryType({geom_col}) = 'POINT'
                     THEN {geom_col}
                 ELSE ST_PointOnSurface({geom_col})
-            END AS _rep_geom
+            END AS _rep_geom,
+            ({min_visible_zoom_expr}) AS _min_visible_zoom
         FROM ({input_query});
     """)
 
@@ -503,11 +555,13 @@ def process(args: Args) -> None:
     # 未割り当てfeatureだけを保持し、zoomごとの反復でbase全体を再走査しない
     conn.execute(f"""
         CREATE TEMP TABLE remaining AS
-        SELECT rowid AS _uid, _rep_geom{sort_select}
+        SELECT rowid AS _uid, _rep_geom, _min_visible_zoom{sort_select}
         FROM base;
     """)
 
     # zoomlevelループ: 各zoomで代表点を1つ選んでassign
+    # bbox サイズが小さく resolution(z) * factor を満たさない feature は
+    # _min_visible_zoom > z で除外され、より高い zoom でのみ候補となる。
     for z in range(args.minzoom, args.maxzoom):
         zoom_t0 = time.perf_counter()
         prec = args.resolution_base / (args.resolution_multiplier**z)
@@ -516,6 +570,7 @@ def process(args: Args) -> None:
             CREATE TEMP TABLE newly_assigned AS
             SELECT r._uid, {z} AS zoomlevel
             FROM remaining r
+            WHERE r._min_visible_zoom <= {z}
             QUALIFY row_number() OVER (
                 PARTITION BY
                     floor(ST_X(r._rep_geom) / {prec}),
