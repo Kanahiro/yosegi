@@ -113,6 +113,63 @@ DuckDB's parquet reader prunes row groups using the `bbox.*` and `zoomlevel` col
 
 > Note: `geometry && ST_MakeEnvelope(...)` returns the same rows but does not push down to row-group statistics, so it reads geometry pages for every candidate RG. Prefer the explicit `bbox.*` predicates above.
 
+## Physical layout: STR-pack
+
+Within each zoomlevel, yosegi orders rows with [Sort-Tile-Recursive (STR) bbox packing](https://www.researchgate.net/publication/2629750_STR_A_Simple_and_Efficient_Algorithm_for_R-Tree_Packing). The goal is to keep each row group's bbox as compact as possible so that bbox-covering predicates prune effectively.
+
+### The algorithm
+
+Let *N* be the number of rows in this zoom and *M* the row group size (`--parquet-row-group-size`).
+
+1. **Strip by bbox-center-x.** Sort all *N* rows by `(xmin + xmax) / 2` and chunk them into strips of `strip_size = M × round(√(N/M))` rows. There are roughly `√(N/M)` strips, each containing roughly `√(N/M)` row groups.
+2. **Sort by bbox-center-y inside each strip, with boustrophedon.** Even-numbered strips are sorted ascending in y, odd-numbered strips descending. Consecutive features at strip boundaries stay close in y.
+
+The SQL pattern (simplified):
+
+```sql
+ORDER BY
+  FLOOR((ROW_NUMBER() OVER (ORDER BY xc) - 1) / strip_size),
+  CASE WHEN strip_id % 2 = 0 THEN  yc ELSE -yc END
+```
+
+### Strip boundaries align with RG boundaries
+
+`strip_size` is always a multiple of *M*, so when pyarrow writes one row group every *M* rows, **every spatial discontinuity (jumping from one strip's x-range to the next) lands on a row group boundary**. No row group ever spans two strips. Per-RG bbox extent is bounded by:
+
+- x extent ≤ one strip width ≈ total x range / `√(N/M)`
+- y extent ≤ one tile height ≈ total y range / `√(N/M)`
+
+That is, each RG covers a near-square tile of area ≈ *M / N* of the data extent — within a constant factor of the theoretical optimum.
+
+```
+file order →
+┌──── strip 0 (low x) ────┐┌──── strip 1 (mid x) ────┐┌──── strip 2 ────
+│  RG0  RG1  RG2 ... RG13 ││  RG14  RG15 ... RG27    ││  ...
+│   ↑                      ││   ↓                      ││   ↑
+│   y low → → → → → y high ││   y high → → → → → y low ││   y low → ...
+└──────────────────────────┘└──────────────────────────┘└─────────────
+                            ★ strip boundary == RG boundary; x jumps,
+                              y stays at high (boustrophedon)
+```
+
+### Why not Hilbert curve?
+
+Earlier versions used `ST_Hilbert(point, bounds)` over a representative point. STR-pack consistently touches **27–37% fewer row groups** for tile-bbox queries on heavy-tailed feature-size data, regardless of whether Hilbert is fed the centroid or the bbox-center. The gap is structural, not about the input point:
+
+- **Curve jumps.** Hilbert can place spatially distant points consecutively at recursive sub-quadrant boundaries. If such a jump lands inside a row group window, that RG's bbox spans both sub-quadrants. STR has no such jumps — strip and tile boundaries are contiguous by construction and are pinned to RG boundaries.
+- **Aspect ratio.** Hilbert quantizes to a square grid. STR's strip count adapts to the actual row count, not to the bounding box shape.
+- **No worst-case bound.** Hilbert's per-RG extent is small *on average* but unbounded in the worst case. STR gives an analytic upper bound (one strip × one tile).
+
+Empirical comparison on 200k synthetic features with heavy-tailed sizes (RG size 1000, 240 random tile bbox queries at z=8/10/12):
+
+| layout | mean RGs touched | mean bytes touched | ratio vs STR |
+|---|---|---|---|
+| STR-pack | ~7–8 | ~1.0 MB | 1.00× |
+| Hilbert (PointOnSurface) | ~10–12 | ~1.4 MB | 1.30–1.37× |
+| Hilbert (bbox-center)    | ~10–12 | ~1.4 MB | 1.33–1.38× |
+
+The two Hilbert variants are within noise of each other — the loss is intrinsic to mapping 2D to 1D, not to the choice of input point.
+
 ## Demo
 
 <https://dmsd2c92bdh54.cloudfront.net/index.html>
