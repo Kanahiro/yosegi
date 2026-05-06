@@ -172,7 +172,7 @@ The two Hilbert variants are within noise of each other — the loss is intrinsi
 
 ## Demo
 
-<https://dmsd2c92bdh54.cloudfront.net/index.html>
+<https://d3ks1i00ysei8.cloudfront.net/>
 
 - DeckGL + GeoArrowScatterPlotLayer + DuckDB
   - Query Parquet with DuckDB and pass results to GeoArrowScatterPlotLayer
