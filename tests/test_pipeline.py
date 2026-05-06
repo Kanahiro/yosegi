@@ -21,7 +21,7 @@ def _make_args(input_file: Path, output_file: Path, **overrides) -> Args:
 
 
 def _expected_columns() -> set[str]:
-    return {"id", "geometry", "bbox", "zoomlevel", "quadkey"}
+    return {"id", "geometry", "bbox", "zoomlevel"}
 
 
 def test_polygon_pipeline_preserves_rows(
@@ -82,18 +82,31 @@ def test_explicit_sort_by_overrides_default(
     assert t.num_rows == 2000
 
 
-def test_output_is_sorted_by_zoom_then_quadkey(
+def test_output_is_sorted_by_zoom(
     polygons_parquet: Path, tmp_path: Path
 ) -> None:
     out = tmp_path / "out.parquet"
     process(_make_args(polygons_parquet, out))
     t = pq.read_table(out)
     zooms = t["zoomlevel"].to_pylist()
-    quadkeys = t["quadkey"].to_pylist()
     for i in range(1, len(zooms)):
-        prev = (zooms[i - 1], quadkeys[i - 1])
-        curr = (zooms[i], quadkeys[i])
-        assert prev <= curr, f"row {i} is out of order: {prev} > {curr}"
+        assert zooms[i - 1] <= zooms[i], (
+            f"row {i} zoom out of order: {zooms[i - 1]} > {zooms[i]}"
+        )
+
+
+def test_output_has_geo_metadata(polygons_parquet: Path, tmp_path: Path) -> None:
+    import json
+
+    out = tmp_path / "out.parquet"
+    process(_make_args(polygons_parquet, out))
+    pf = pq.ParquetFile(out)
+    md = pf.schema.to_arrow_schema().metadata
+    assert b"geo" in md
+    geo = json.loads(md[b"geo"])
+    assert geo["version"] == "1.1.0"
+    assert geo["primary_column"] == "geometry"
+    assert "covering" in geo["columns"]["geometry"]
 
 
 def test_size_factor_filters_small_polygons_at_low_zoom(
@@ -129,6 +142,66 @@ def test_size_factor_zero_disables_filter(
     process(_make_args(polygons_parquet, out, min_visible_size_factor=0.0))
     t = pq.read_table(out)
     assert t.num_rows == 2000
+
+
+def test_str_layout_polygon_pipeline(
+    polygons_parquet: Path, tmp_path: Path
+) -> None:
+    """STR layout must produce a valid pyramid with the same row count and
+    zoom-sorted output."""
+    out = tmp_path / "out.parquet"
+    process(_make_args(polygons_parquet, out))
+    t = pq.read_table(out)
+    assert t.num_rows == 2000
+    assert _expected_columns() <= set(t.column_names)
+    assert "_strip_id" not in t.column_names
+    assert "_bbox_ymin" not in t.column_names
+    zooms = t["zoomlevel"].to_pylist()
+    for i in range(1, len(zooms)):
+        assert zooms[i - 1] <= zooms[i]
+
+
+def test_str_layout_within_zoom_orders_by_strip_then_ymin(
+    polygons_parquet: Path, tmp_path: Path
+) -> None:
+    """Within each zoom level, STR layout should produce monotonic strip
+    sequence (xmin grows across strips) and ymin grows within strips."""
+    out = tmp_path / "out.parquet"
+    process(_make_args(polygons_parquet, out, parquet_row_group_size=64))
+    t = pq.read_table(out)
+    bboxes = t["bbox"].to_pylist()
+    zooms = t["zoomlevel"].to_pylist()
+    # group rows by zoom, then check that the rolling-max xmin is non-decreasing
+    # across distinct strips. We don't have strip_id at hand, but the property
+    # we want is: if you partition the rows into chunks of sqrt(N*M), each
+    # chunk's xmin range is mostly disjoint from the next. Use a relaxed check:
+    # the global xmin should trend upward across the zoom group.
+    by_zoom: dict[int, list[dict]] = {}
+    for z, b in zip(zooms, bboxes):
+        by_zoom.setdefault(z, []).append(b)
+    for z, rows in by_zoom.items():
+        if len(rows) < 200:
+            continue
+        first_q_xmin = sorted(r["xmin"] for r in rows[: len(rows) // 4])
+        last_q_xmin = sorted(r["xmin"] for r in rows[-len(rows) // 4 :])
+        # median of last quarter should be >= median of first quarter
+        assert last_q_xmin[len(last_q_xmin) // 2] >= first_q_xmin[
+            len(first_q_xmin) // 2
+        ], f"zoom {z}: STR strips should advance in xmin"
+
+
+def test_str_layout_lines_pipeline(lines_parquet: Path, tmp_path: Path) -> None:
+    out = tmp_path / "out.parquet"
+    process(_make_args(lines_parquet, out, maxzoom=5))
+    t = pq.read_table(out)
+    assert t.num_rows == 1000
+
+
+def test_str_layout_points_pipeline(points_parquet: Path, tmp_path: Path) -> None:
+    out = tmp_path / "out.parquet"
+    process(_make_args(points_parquet, out, maxzoom=5))
+    t = pq.read_table(out)
+    assert t.num_rows == 1000
 
 
 def test_size_factor_pushes_filtered_to_maxzoom(

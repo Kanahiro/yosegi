@@ -28,147 +28,147 @@ options:
   --resolution-multiplier RESOLUTION_MULTIPLIER
                         Resolution multiplier (default: 2.0)
   --geometry-column GEOMETRY_COLUMN
-                        Geometry column name (optional)
+                        Geometry column name (auto-detected if not specified)
   --parquet-row-group-size PARQUET_ROW_GROUP_SIZE
                         Parquet row group size (default: 10240)
-  --sort-by SORT_BY     Sort key for feature thinning (default: ST_Area DESC for polygons, ST_Length DESC for lines, hash(_uid) otherwise)
+  --sort-by SORT_BY     Sort key for feature thinning
+                        (default: ST_Area DESC for polygons,
+                                  ST_Length DESC for lines,
+                                  hash(_uid) otherwise)
+  --min-visible-size-factor MIN_VISIBLE_SIZE_FACTOR
+                        Skip features at low zoom whose bbox is smaller than
+                        the grid resolution times this factor (default: 1.0,
+                        0 to disable)
 ```
 
 ## Overview of Pyramid (Geo)Parquet
 
 ### Concept
 
-- Pre-calculate which features are visible at each zoomlevel.
-- Pre-calculate quadkey for each feature.
-- Sort features by zoomlevel and quadkey.
+- Pre-calculate which features are visible at each zoomlevel (density-based thinning).
+- Emit a per-row `bbox` covering column referenced via [GeoParquet 1.1 `covering` metadata](https://geoparquet.org/releases/v1.1.0/) so spatial readers can prune row groups via column statistics.
+- Sort the output so that:
+  - Each row group contains rows from exactly one zoomlevel (zoom-aligned RGs → tight `zoomlevel` stats).
+  - Within each zoomlevel, rows follow [Sort-Tile-Recursive (STR) bbox packing](https://www.researchgate.net/publication/2629750_STR_A_Simple_and_Efficient_Algorithm_for_R-Tree_Packing): bbox-center-x is divided into ~√(N/M) strips, then bbox-center-y inside each strip is ordered with boustrophedon (alternating direction). This gives tight per-RG bbox stats so that bbox-covering predicates prune effectively.
 
-**By these steps, generate Pyramid-structure in a single Parquet file, just like GeoTIFF pyramid.**
+**By these steps, generate Pyramid-structure in a single Parquet file, just like a GeoTIFF pyramid.**
 
-- Like GeoTIFF, overview of entire data can be obtained quickly.
-- Unlike GeoTIFF, lower resolution data are not repeated because this is vector.
+- Like GeoTIFF, an overview of the entire dataset can be obtained quickly.
+- Unlike GeoTIFF, lower-resolution data is not repeated because this is vector.
 
 #### QGIS: read Pyramid parquet on Amazon S3. Blue to Red means zoomlevel. Data: OvertureMaps
 
 <https://github.com/user-attachments/assets/4df86816-559d-4b34-b57a-2f3d4b8bd14c>
 
-#### QGIS: loading raw parquet (sorted only by spatially)
+#### QGIS: loading raw parquet (sorted only spatially)
 
 <https://github.com/user-attachments/assets/4e7a61f2-eb78-4658-a55f-8de31e2796c9>
 
-*Well sorted spatially but it takes too much time to obtain overview of entire dataset.*
+*Well sorted spatially but it takes too much time to obtain an overview of the entire dataset.*
 
-#### Browser(DeckGL + DuckDB): load that parquet and render with [GeoArrowScatterPlotLayer](https://github.com/geoarrow/deck.gl-layers)
+#### Browser (DeckGL + DuckDB): load that parquet and render with [GeoArrowScatterPlotLayer](https://github.com/geoarrow/deck.gl-layers)
 
 <https://github.com/user-attachments/assets/26e2f662-474b-4d11-ab56-f73587ef8b2e>
 
 ### Table Structure
 
-Original:
+Original input columns are preserved. Yosegi appends two columns:
+
+| Column | Type | Purpose |
+|---|---|---|
+| `bbox` | `STRUCT<xmin, ymin, xmax, ymax: DOUBLE>` | GeoParquet 1.1 covering bbox per feature; enables row-group pruning |
+| `zoomlevel` | `INT32` | Lowest zoom at which the feature is visible (pyramid level) |
+
+The `geometry` column is rewritten as WKB. GeoParquet `covering.bbox` metadata points to the `bbox` STRUCT child fields so that compliant readers automatically use it for spatial pushdown.
+
+If the input already has a column named `bbox` or `zoomlevel`, the input column is dropped and overwritten by yosegi's value (a notice is logged).
 
 ```planetext
-┌──────────────────────┬──────────────────────┬───┬──────────────────────┬─────────┬─────────┐
-│          id          │       geometry       │ … │       filename       │  theme  │  type   │
-│       varchar        │       geometry       │   │       varchar        │ varchar │ varchar │
-├──────────────────────┼──────────────────────┼───┼──────────────────────┼─────────┼─────────┤
-│ 5e1da825-ef9b-45dd…  │ POINT (122.309211 …  │ … │ s3://overturemaps-…  │ places  │ place   │
-│ 0c8ef190-3302-457d…  │ POINT (122.23393 4…  │ … │ s3://overturemaps-…  │ places  │ place   │
-│ 6030866d-d428-4411…  │ POINT (122.164515 …  │ … │ s3://overturemaps-…  │ places  │ place   │
-│ e59b1a93-383d-4d4b…  │ POINT (122.40588 4…  │ … │ s3://overturemaps-…  │ places  │ place   │
-│ 993b4cb1-1dce-45c5…  │ POINT (122.8591 45…  │ … │ s3://overturemaps-…  │ places  │ place   │
-│ 193eb59f-2cbf-49aa…  │ POINT (122.572 45.…  │ … │ s3://overturemaps-…  │ places  │ place   │
-│ a74d5f2e-751a-4297…  │ POINT (123.188563 …  │ … │ s3://overturemaps-…  │ places  │ place   │
-│ fd94035d-26db-4b79…  │ POINT (123.164364 …  │ … │ s3://overturemaps-…  │ places  │ place   │
-│ a46dcdef-e802-4928…  │ POINT (122.8753426…  │ … │ s3://overturemaps-…  │ places  │ place   │
-│ 025180d0-1100-46ab…  │ POINT (122.857046 …  │ … │ s3://overturemaps-…  │ places  │ place   │
-│ 09d95c3e-99d6-4ef2…  │ POINT (122.827855 …  │ … │ s3://overturemaps-…  │ places  │ place   │
-│ 97b500b4-d540-4a08…  │ POINT (122.8279423…  │ … │ s3://overturemaps-…  │ places  │ place   │
-│          ·           │          ·           │ · │          ·           │   ·     │   ·     │
-│          ·           │          ·           │ · │          ·           │   ·     │   ·     │
-│          ·           │          ·           │ · │          ·           │   ·     │   ·     │
-│ ec9469f0-bb92-490e…  │ POINT (122.34375 2…  │ … │ s3://overturemaps-…  │ places  │ place   │
-│ 16ef1bd2-aeba-473c…  │ POINT (137.3721886…  │ … │ s3://overturemaps-…  │ places  │ place   │
-│ 462ff6d1-f1af-4100…  │ POINT (137.2338562…  │ … │ s3://overturemaps-…  │ places  │ place   │
-│ de4288c0-93b2-4a78…  │ POINT (138.3370972…  │ … │ s3://overturemaps-…  │ places  │ place   │
-│ a44ef5e9-ead6-45c3…  │ POINT (140.770368 …  │ … │ s3://overturemaps-…  │ places  │ place   │
-│ c220f122-a7d7-4991…  │ POINT (144.6288514…  │ … │ s3://overturemaps-…  │ places  │ place   │
-│ 3ee9fcf8-6684-4d01…  │ POINT (144.8833333…  │ … │ s3://overturemaps-…  │ places  │ place   │
-│ a901c450-3c83-4ffb…  │ POINT (144.1404963…  │ … │ s3://overturemaps-…  │ places  │ place   │
-│ 3d8e1e58-a107-4ba0…  │ POINT (147.5786018…  │ … │ s3://overturemaps-…  │ places  │ place   │
-│ f3c402dc-3f8b-4b87…  │ POINT (146.5937114…  │ … │ s3://overturemaps-…  │ places  │ place   │
-│ 083f2b74-163a-4427…  │ POINT (149.2461111…  │ … │ s3://overturemaps-…  │ places  │ place   │
-├──────────────────────┴──────────────────────┴───┴──────────────────────┴─────────┴─────────┤
-│ 3252680 rows (3.25 million rows, 40 shown)                            19 columns (5 shown) │
-└────────────────────────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────┬──────────────────────┬───┬──────────────────────────────────────┬───────────┐
+│          id          │       geometry       │ … │                 bbox                 │ zoomlevel │
+│       varchar        │         blob         │   │ struct(xmin double, ymin double, …)  │   int32   │
+├──────────────────────┼──────────────────────┼───┼──────────────────────────────────────┼───────────┤
+│ 5e1da825-ef9b-45dd…  │ <wkb POINT>          │ … │ {xmin: 122.30, ymin: 45.40, xmax: …} │         0 │
+│ 8eb4aa8c-81fb-4a9b…  │ <wkb POINT>          │ … │ {xmin: 122.29, ymin: 45.41, xmax: …} │         0 │
+│ … (zoom 0 features) │ …                    │ … │ …                                    │         0 │
+│ … (zoom 1 features) │ …                    │ … │ …                                    │         1 │
+│ …                    │ …                    │ … │ …                                    │         · │
+│ … (zoom 16 features)│ …                    │ … │ …                                    │        16 │
+└──────────────────────┴──────────────────────┴───┴──────────────────────────────────────┴───────────┘
 ```
 
-Pyramid structure:
+### Querying tiles
 
-```planetext
-┌──────────────────────┬──────────────────────┬───┬─────────┬───────────┬──────────────────────┐
-│          id          │       geometry       │ … │  type   │ zoomlevel │       quadkey        │
-│       varchar        │       geometry       │   │ varchar │   int32   │       varchar        │
-├──────────────────────┼──────────────────────┼───┼─────────┼───────────┼──────────────────────┤
-│ 5e1da825-ef9b-45dd…  │ POINT (122.309211 …  │ … │ place   │         0 │ 130321321133100110…  │
-│ 8eb4aa8c-81fb-4a9b…  │ POINT (122.2922402…  │ … │ place   │         0 │ 130323323113231010…  │
-│ bcbc7afb-55ab-4614…  │ POINT (123.873895 …  │ … │ place   │         0 │ 130330222223231232…  │
-│ b1f4848b-9662-4690…  │ POINT (126.288473 …  │ … │ place   │         0 │ 130330233120333022…  │
-│ 9e72a270-b2c4-4fa0…  │ POINT (128.76348 4…  │ … │ place   │         0 │ 130330331203002232…  │
-│ 041af844-b7d1-431a…  │ POINT (131.86278 4…  │ … │ place   │         0 │ 130331233100212033…  │
-│ 1610195b-60c7-4e64…  │ POINT (133.9324379…  │ … │ place   │         0 │ 130331332231132130…  │
-│ a8a3a395-e059-4bcb…  │ POINT (124.6211111…  │ … │ place   │         0 │ 130332021221133210…  │
-│ 486df792-8613-4d45…  │ POINT (128.58908 4…  │ … │ place   │         0 │ 130332130331020231…  │
-│ 633b120a-4a12-4719…  │ POINT (125.0461 41…  │ … │ place   │         0 │ 130332223310103331…  │
-│ 87a6cd83-87b9-4290…  │ POINT (128.6755512…  │ … │ place   │         0 │ 130332333200002230…  │
-│ 0a44b995-d7d1-46b7…  │ POINT (128.8258357…  │ … │ place   │         0 │ 130332333203310220…  │
-│ 55a1aedc-4636-45cb…  │ POINT (130.95233 4…  │ … │ place   │         0 │ 130333032023111100…  │
-│ 2304c1ee-c5be-4316…  │ POINT (132.2290564…  │ … │ place   │         0 │ 130333120222031312…  │
-│ 16553fd2-ced3-42ca…  │ POINT (141.182556 …  │ … │ place   │         0 │ 131221222332030323…  │
-│ 084fafe9-995c-4442…  │ POINT (141.289157 …  │ … │ place   │         0 │ 131221222333300033…  │
-│ b0e52fe2-81e4-43b3…  │ POINT (136.3333333…  │ … │ place   │         0 │ 131222001111223012…  │
-│ 99aea4bb-0ce8-457d…  │ POINT (135.2861111…  │ … │ place   │         0 │ 131222020213032020…  │
-│ 70d00889-6e9f-4ced…  │ POINT (138.6965131…  │ … │ place   │         0 │ 131222321010222033…  │
-│ 2ad92be8-f3f7-4252…  │ POINT (140.6376992…  │ … │ place   │         0 │ 131223022200203023…  │
-│          ·           │          ·           │ · │   ·     │         · │          ·           │
-│          ·           │          ·           │ · │   ·     │         · │          ·           │
-│          ·           │          ·           │ · │   ·     │         · │          ·           │
-│ 9df90671-893f-4eef…  │ POINT (142.2133026…  │ … │ place   │        16 │ 133021232232220102…  │
-│ 077e4ee4-ef79-47ed…  │ POINT (142.213372 …  │ … │ place   │        16 │ 133021232232220102…  │
-│ 106e9793-4d86-45a4…  │ POINT (142.2134436…  │ … │ place   │        16 │ 133021232232220102…  │
-│ 2e6fe019-9d7f-44e9…  │ POINT (142.2134482…  │ … │ place   │        16 │ 133021232232220102…  │
-│ 7a2c6d46-21b1-4890…  │ POINT (142.2134436…  │ … │ place   │        16 │ 133021232232220102…  │
-│ 6a945985-22c8-4878…  │ POINT (142.2134401…  │ … │ place   │        16 │ 133021232232220102…  │
-│ 03cabf3e-da29-4f2c…  │ POINT (142.2134436…  │ … │ place   │        16 │ 133021232232220102…  │
-│ d44b8317-61fa-4d38…  │ POINT (142.2134436…  │ … │ place   │        16 │ 133021232232220102…  │
-│ 8478dc5f-41cd-4bfd…  │ POINT (142.213444 …  │ … │ place   │        16 │ 133021232232220102…  │
-│ 7ae2a2e0-3c39-4899…  │ POINT (138.515625 …  │ … │ place   │        16 │ 133022321222222222…  │
-│ 7c9bdaa3-c9dc-49b4…  │ POINT (142.1574032…  │ … │ place   │        16 │ 133023010203031233…  │
-│ a05bdfc6-002f-4674…  │ POINT (142.1603083…  │ … │ place   │        16 │ 133023010203031301…  │
-│ 820ac51f-3c10-4632…  │ POINT (142.1603296…  │ … │ place   │        16 │ 133023010203031301…  │
-│ 82eb8087-8f15-4e08…  │ POINT (142.1603517…  │ … │ place   │        16 │ 133023010203031310…  │
-│ 228260e9-34c3-4b50…  │ POINT (142.1603606…  │ … │ place   │        16 │ 133023010203031310…  │
-│ 3fd3ec70-8b17-4115…  │ POINT (142.1603727…  │ … │ place   │        16 │ 133023010203031310…  │
-│ 5e188374-8cc9-4709…  │ POINT (141.317 24.8) │ … │ place   │        16 │ 133023022311310313…  │
-│ c9d7e4e5-fa43-43f7…  │ POINT (141.317 24.8) │ … │ place   │        16 │ 133023022311310313…  │
-│ 16af51c8-40c3-48d6…  │ POINT (141.317 24.8) │ … │ place   │        16 │ 133023022311310313…  │
-│ 4fa488a0-601b-43a7…  │ POINT (141.317 24.8) │ … │ place   │        16 │ 133023022311310313…  │
-├──────────────────────┴──────────────────────┴───┴─────────┴───────────┴──────────────────────┤
-│ 3252680 rows (3.25 million rows, 40 shown)                              21 columns (5 shown) │
-└──────────────────────────────────────────────────────────────────────────────────────────────┘
-```
-
-As you can see:
-
-- Sorted by zoomlevel. Then, rows of one zoomlevel are stored sequentially.
-- Within each zoomlevel, sorted by quadkey. Then, spatially close features are stored sequentially in each resolution and this is efficient for reading tile-based area of interest.
-
-Then, we can obtain features in area of interest like below:
+Use the bbox covering column for spatial pushdown plus `zoomlevel` for pyramid pruning:
 
 ```sql
--- DuckDB example: retrieve all features in one tile
+-- DuckDB: features visible at z<=10 inside a tile bbox
 SELECT * FROM 'example.pyramid.parquet'
-  WHERE zoomlevel <= 10
-    AND quadkey LIKE '133002110%'
+WHERE zoomlevel <= 10
+  AND bbox.xmax >= :tile_minx AND bbox.xmin <= :tile_maxx
+  AND bbox.ymax >= :tile_miny AND bbox.ymin <= :tile_maxy;
 ```
+
+DuckDB's parquet reader prunes row groups using the `bbox.*` and `zoomlevel` column statistics, so only the matching RGs are downloaded over HTTP.
+
+> Note: `geometry && ST_MakeEnvelope(...)` returns the same rows but does not push down to row-group statistics, so it reads geometry pages for every candidate RG. Prefer the explicit `bbox.*` predicates above.
+
+## Physical layout: STR-pack
+
+Within each zoomlevel, yosegi orders rows with [Sort-Tile-Recursive (STR) bbox packing](https://www.researchgate.net/publication/2629750_STR_A_Simple_and_Efficient_Algorithm_for_R-Tree_Packing). The goal is to keep each row group's bbox as compact as possible so that bbox-covering predicates prune effectively.
+
+### The algorithm
+
+Let *N* be the number of rows in this zoom and *M* the row group size (`--parquet-row-group-size`).
+
+1. **Strip by bbox-center-x.** Sort all *N* rows by `(xmin + xmax) / 2` and chunk them into strips of `strip_size = M × round(√(N/M))` rows. There are roughly `√(N/M)` strips, each containing roughly `√(N/M)` row groups.
+2. **Sort by bbox-center-y inside each strip, with boustrophedon.** Even-numbered strips are sorted ascending in y, odd-numbered strips descending. Consecutive features at strip boundaries stay close in y.
+
+The SQL pattern (simplified):
+
+```sql
+ORDER BY
+  FLOOR((ROW_NUMBER() OVER (ORDER BY xc) - 1) / strip_size),
+  CASE WHEN strip_id % 2 = 0 THEN  yc ELSE -yc END
+```
+
+### Strip boundaries align with RG boundaries
+
+`strip_size` is always a multiple of *M*, so when pyarrow writes one row group every *M* rows, **every spatial discontinuity (jumping from one strip's x-range to the next) lands on a row group boundary**. No row group ever spans two strips. Per-RG bbox extent is bounded by:
+
+- x extent ≤ one strip width ≈ total x range / `√(N/M)`
+- y extent ≤ one tile height ≈ total y range / `√(N/M)`
+
+That is, each RG covers a near-square tile of area ≈ *M / N* of the data extent — within a constant factor of the theoretical optimum.
+
+```
+file order →
+┌──── strip 0 (low x) ────┐┌──── strip 1 (mid x) ────┐┌──── strip 2 ────
+│  RG0  RG1  RG2 ... RG13 ││  RG14  RG15 ... RG27    ││  ...
+│   ↑                      ││   ↓                      ││   ↑
+│   y low → → → → → y high ││   y high → → → → → y low ││   y low → ...
+└──────────────────────────┘└──────────────────────────┘└─────────────
+                            ★ strip boundary == RG boundary; x jumps,
+                              y stays at high (boustrophedon)
+```
+
+### Why not Hilbert curve?
+
+Earlier versions used `ST_Hilbert(point, bounds)` over a representative point. STR-pack consistently touches **27–37% fewer row groups** for tile-bbox queries on heavy-tailed feature-size data, regardless of whether Hilbert is fed the centroid or the bbox-center. The gap is structural, not about the input point:
+
+- **Curve jumps.** Hilbert can place spatially distant points consecutively at recursive sub-quadrant boundaries. If such a jump lands inside a row group window, that RG's bbox spans both sub-quadrants. STR has no such jumps — strip and tile boundaries are contiguous by construction and are pinned to RG boundaries.
+- **Aspect ratio.** Hilbert quantizes to a square grid. STR's strip count adapts to the actual row count, not to the bounding box shape.
+- **No worst-case bound.** Hilbert's per-RG extent is small *on average* but unbounded in the worst case. STR gives an analytic upper bound (one strip × one tile).
+
+Empirical comparison on 200k synthetic features with heavy-tailed sizes (RG size 1000, 240 random tile bbox queries at z=8/10/12):
+
+| layout | mean RGs touched | mean bytes touched | ratio vs STR |
+|---|---|---|---|
+| STR-pack | ~7–8 | ~1.0 MB | 1.00× |
+| Hilbert (PointOnSurface) | ~10–12 | ~1.4 MB | 1.30–1.37× |
+| Hilbert (bbox-center)    | ~10–12 | ~1.4 MB | 1.33–1.38× |
+
+The two Hilbert variants are within noise of each other — the loss is intrinsic to mapping 2D to 1D, not to the choice of input point.
 
 ## Demo
 
@@ -179,33 +179,43 @@ SELECT * FROM 'example.pyramid.parquet'
 
 ## Benefits
 
-- Single Parquet can be used for storing data and streaming.
-- We can get overview of entire data quickly much faster than by only ordinary spatial sort like quadkey or Hilbert curve.
-- Thanks to very efficient pushdown filtering by zoomlevel and quadkey, we can read partial content of large Parquet file quickly.
+- Single Parquet can be used for both storage and streaming.
+- Overview of the entire dataset is obtained quickly — much faster than with a plain spatial sort (quadkey / Hilbert) because lower zooms contain only the features needed at that resolution.
+- Efficient row-group pruning thanks to GeoParquet 1.1 bbox covering + zoom-aligned row groups, so HTTP-range reads of huge files (100s of MB) are minimized.
 
-## How calculate zoomlevel?
+## How is zoomlevel calculated?
 
-Density based clustering approach is used. Generally, at lower zoom we don't need to show all features. By this approach, only essential features for visualization are kept at lower zoomlevels. Repeating this process from minzoom to maxzoom, we can get which features are visible at each zoomlevel.
+A density-based clustering approach is used. At lower zoom we don't need to render every feature, so only essential features are kept at lower zoomlevels. Repeating this process from `--minzoom` to `--maxzoom` decides which features are visible at each zoom.
 
-## Why quadkey?
+`--sort-by` controls the priority order used during thinning (default keeps larger polygons / longer lines first; smaller ones are pushed to deeper zooms).
 
-- Hilbert curve is great for spatial locality but hierarchical query with tile index is not efficient. Querying quadkey with `LIKE` is more efficient for tile-based filtering.
-- Index generated by `ST_Hilbert` function of DuckDB is not consistent, values depends on bbox ([detail](https://duckdb.org/docs/stable/core_extensions/spatial/functions#description-57)).
+`--min-visible-size-factor` additionally skips features whose bbox is too small to be visible at a given zoom's grid resolution.
 
-## Why not Tile?
+## Why bbox covering instead of quadkey?
 
-- Since creating a tileset exclusively for streaming is painful, it is better to support streaming directly from one original file.
-- Contents of lower zoom tiles are wasted when higher zoom levels are shown. Then same feature repeatedly appears in larger zoom levels.
-- MapboxVectorTiles is lossy format.
+Earlier versions of yosegi appended a `quadkey` column and queried with `quadkey LIKE 'prefix%'`. This was replaced by the GeoParquet 1.1 bbox covering pattern because:
+
+- Bbox struct min/max statistics are written by parquet writers automatically; row-group pruning is fully transparent to the consumer.
+- A query bbox doesn't have to be aligned to a tile boundary.
+- It's the canonical mechanism in the GeoParquet 1.1 specification, supported out of the box by DuckDB, GeoPandas, GDAL, and SedonaDB.
+- The output stays a clean GeoParquet — no yosegi-specific column required for spatial filtering.
+
+## Why not tiles?
+
+- Building a tileset purely for streaming is operational overhead; streaming directly from one source file is simpler.
+- Lower-zoom tile contents are wasted once you zoom in past them, and the same feature is repeated across zooms.
+- Mapbox Vector Tiles are a lossy format.
 
 ## Why not FlatGeobuf?
 
-- FlatGeobuf is also oriented to single file storage and streaming. However it has no pyramid structure, then:
-  - Overview of entire data cannot be obtained quickly.
-  - Tile-based area of interest query is not efficient (in the case of high density dataset, too many features may include in one tile.)
+FlatGeobuf is also oriented to single-file storage and streaming, but it has no pyramid structure, so:
+
+- An overview of the whole dataset can't be obtained quickly.
+- A dense area's tile-based query may pull too many features.
 
 ## References
 
 - <https://medium.com/radiant-earth-insights/using-duckdbs-hilbert-function-with-geop-8ebc9137fb8a>
 - <https://medium.com/radiant-earth-insights/the-admin-partitioned-geoparquet-distribution-59f0ca1c6d96>
+- <https://geoparquet.org/releases/v1.1.0/>
 - <https://github.com/felt/tippecanoe>

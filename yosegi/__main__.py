@@ -1,14 +1,10 @@
 import argparse
 import json
-import math
 import sys
 import time
 from dataclasses import dataclass
 
 import duckdb
-import numpy as np
-import pyarrow as pa
-import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 
@@ -109,10 +105,8 @@ def parse_arguments() -> Args:
             "Set to 0 to disable filtering (default: 1.0)"
         ),
     )
-
     args = parser.parse_args()
 
-    # ST_Quadkey の level は 1..23 のみ受け付ける
     if not 1 <= args.maxzoom <= 23:
         parser.error(f"--maxzoom must be in [1, 23], got {args.maxzoom}")
     if not 0 <= args.minzoom < args.maxzoom:
@@ -140,34 +134,6 @@ def parse_arguments() -> Args:
     )
 
 
-def build_output_query(
-    geom_col: str, maxzoom: int, zoomlevel_filter: int | None = None
-) -> str:
-    """出力クエリを生成"""
-    where_clause = (
-        f"WHERE a.zoomlevel = {zoomlevel_filter}"
-        if zoomlevel_filter is not None
-        else ""
-    )
-    return f"""
-        SELECT
-            b.* EXCLUDE (_rep_geom, _min_visible_zoom, {geom_col}),
-            ST_AsWKB(b.{geom_col}) AS {geom_col},
-            {{
-                'xmin': ST_XMin(b.{geom_col}),
-                'ymin': ST_YMin(b.{geom_col}),
-                'xmax': ST_XMax(b.{geom_col}),
-                'ymax': ST_YMax(b.{geom_col})
-            }} AS bbox,
-            a.zoomlevel,
-            ST_Quadkey(b._rep_geom, {maxzoom}) AS quadkey
-        FROM base b
-        JOIN assigned a ON b.rowid = a._uid
-        {where_clause}
-        ORDER BY a.zoomlevel, quadkey
-    """
-
-
 _GEOMETRY_TYPE_MAP = {
     "POINT": "Point",
     "LINESTRING": "LineString",
@@ -179,76 +145,34 @@ _GEOMETRY_TYPE_MAP = {
 }
 
 
-def _compute_quadkey_change_level(
-    quadkey_col: pa.ChunkedArray | pa.Array, prefix_len: int
-) -> np.ndarray:
-    """隣接 quadkey 間で先頭 prefix_len 文字内の最初の差異位置 + 1 を返す。
+def _str_order_clause(geom_col: str, row_group_size: int) -> str:
+    """zoom 1 つ分の SELECT に対する ORDER BY 句を返す（Sort-Tile-Recursive packing）。
 
-    どこも違わない (prefix_len 文字すべて一致) 場合は prefix_len + 1。
-    quadkey は ST_Quadkey(_, maxzoom) により maxzoom 文字に揃っており
-    prefix_len <= maxzoom なので、各 prefix は固定長 prefix_len バイトとなる。
+    bbox-center-x で sqrt(N/M) 本のストリップに分割し、ストリップ内は
+    bbox-center-y を boustrophedon（交互に正負反転）でソート。
+    呼び出し側は単一 zoom にフィルタ済みの SELECT を流す前提。
     """
-    prefix = pc.utf8_slice_codeunits(quadkey_col, 0, prefix_len)  # ty: ignore[unresolved-attribute]
-    if isinstance(prefix, pa.ChunkedArray):
-        prefix = prefix.combine_chunks()
-    n = len(prefix)
-    data = np.frombuffer(prefix.buffers()[2], dtype=np.uint8, count=n * prefix_len)
-    byte_arr = data.reshape(n, prefix_len)
-    diff = byte_arr[1:] != byte_arr[:-1]
-    any_diff = diff.any(axis=1)
-    first_diff = diff.argmax(axis=1)
-    return np.where(any_diff, first_diff + 1, prefix_len + 1)
-
-
-def _split_at_quadkey_prefix(
-    table: pa.Table,
-    max_rows: int,
-    min_rows: int,
-    prefix_len: int,
-):
-    """tableをquadkey prefixの境界でスライスして yield する。
-
-    分割条件:
-    - rg_size >= max_rows: 強制分割
-    - prefix-1 が変化したら常に分割 (chunkがprefix-1を跨ぐのを防ぎ、各chunkを
-      ある親タイル内に閉じる)
-    - prefix-K (1 < K <= prefix_len) では rg_size >= threshold(K) のときのみ分割
-      これにより小さな深層バケットは隣接バケットと同じchunkにまとまる
+    m = float(row_group_size)
+    strip_id = f"""
+        CAST(FLOOR(
+            (ROW_NUMBER() OVER (
+                ORDER BY (ST_XMin(b.{geom_col}) + ST_XMax(b.{geom_col})) / 2
+            ) - 1)
+            / GREATEST(
+                {m},
+                {m} * CAST(GREATEST(1, ROUND(SQRT(
+                    COUNT(*) OVER () / {m}
+                ))) AS BIGINT)
+            )
+        ) AS BIGINT)
     """
-    n = table.num_rows
-    if n == 0:
-        return
-    if n == 1:
-        yield table
-        return
-
-    change_level = _compute_quadkey_change_level(table.column("quadkey"), prefix_len)
-
-    coarse_threshold = max(1, min_rows // 4)
-    start = 0
-    for i in range(1, n):
-        rg_size = i - start
-        if rg_size >= max_rows:
-            yield table.slice(start, rg_size)
-            start = i
-            continue
-
-        cl = int(change_level[i - 1])
-        if cl > prefix_len:
-            continue
-
-        if cl == 1:
-            yield table.slice(start, rg_size)
-            start = i
-            continue
-
-        threshold = min_rows if cl == prefix_len else coarse_threshold
-        if rg_size >= threshold:
-            yield table.slice(start, rg_size)
-            start = i
-
-    if start < n:
-        yield table.slice(start, n - start)
+    return f"""
+        {strip_id},
+        CASE WHEN ({strip_id}) % 2 = 0
+        THEN  (ST_YMin(b.{geom_col}) + ST_YMax(b.{geom_col})) / 2
+        ELSE -(ST_YMin(b.{geom_col}) + ST_YMax(b.{geom_col})) / 2
+        END
+    """
 
 
 def write_geoparquet(
@@ -257,23 +181,22 @@ def write_geoparquet(
     geom_col: str,
     geometry_types_raw: set[str],
 ) -> None:
-    """GeoParquetを書き込む。
+    """GeoParquet を書き込む。
 
-    RowGroup分割戦略:
-    - 全データを (zoomlevel, quadkey) でソート済み
-    - quadkey prefix-N の境界で RowGroup を切り、各 RG の quadkey min/max を
-      タイト化してプッシュダウン効率を上げる
-    - 低zoomは閾値到達せず自然に複数zoomがパックされる
-    - 高zoomは zl_count >= max_rows のとき先にflushして混在を防ぐ
+    各 zoom level を独立に DuckDB から取り出し、pyarrow ParquetWriter で
+    書き込む。`writer.write_table(..., row_group_size=M)` は呼び出しごとに
+    新しい row group を切るため、**zoom 境界は必ず row group 境界と一致する**。
+
+    結果として:
+    - 1 つの RG が複数 zoom の行を含むことはない (zoomlevel 列の RG 統計が tight)
+    - 各 zoom の最後の RG は M 未満になり得る (低 zoom で row 数 < M の場合)
+    - bbox covering 統計の混入も無くなる (RG bbox は単一 zoom の集合)
+
+    各 zoom 内は Sort-Tile-Recursive bbox packing でソートする。
     """
 
-    _log("      scanning schema / bbox / geometry types...")
+    _log("      computing bbox / geometry types...")
 
-    # スキーマ取得
-    schema_query = build_output_query(geom_col, args.maxzoom) + " LIMIT 1"
-    schema = conn.execute(schema_query).fetch_arrow_table().schema
-
-    # 全体bboxを取得 (geometry_types は process() で取得済み)
     bbox_row = conn.execute(f"""
         SELECT
             MIN(ST_XMin({geom_col})),
@@ -286,13 +209,11 @@ def write_geoparquet(
         {_GEOMETRY_TYPE_MAP.get(t, t) for t in geometry_types_raw}
     )
     _log(f"      geometry types: {', '.join(geometry_types) or '(none)'}")
-    if bbox_row is not None and all(v is not None for v in bbox_row):
-        bx = [float(v) for v in bbox_row]
-        _log(
-            f"      bbox:           [{bx[0]:.4f}, {bx[1]:.4f}, {bx[2]:.4f}, {bx[3]:.4f}]"
-        )
+    if bbox_row is None or any(v is None for v in bbox_row):
+        raise ValueError("Could not compute bbox: input has no valid geometries")
+    bx = [float(v) for v in bbox_row]
+    _log(f"      bbox:           [{bx[0]:.4f}, {bx[1]:.4f}, {bx[2]:.4f}, {bx[3]:.4f}]")
 
-    # GeoParquetメタデータ設定 (1.1.0 spec: covering / bbox / geometry_types)
     column_metadata: dict = {
         "encoding": "WKB",
         "geometry_types": geometry_types,
@@ -304,105 +225,82 @@ def write_geoparquet(
                 "ymax": ["bbox", "ymax"],
             }
         },
+        "bbox": bx,
     }
-    if bbox_row is not None and all(v is not None for v in bbox_row):
-        column_metadata["bbox"] = [float(v) for v in bbox_row]
-
     geo_metadata = {
         "version": "1.1.0",
         "primary_column": geom_col,
         "columns": {geom_col: column_metadata},
     }
-    schema = schema.with_metadata({b"geo": json.dumps(geo_metadata).encode("utf-8")})
+    geo_json_bytes = json.dumps(geo_metadata).encode("utf-8")
 
-    # zoomlevelごとの行数を取得
-    zoomlevels = conn.execute("""
-        SELECT zoomlevel, COUNT(*) as cnt
-        FROM assigned
-        GROUP BY zoomlevel
-        ORDER BY zoomlevel
-    """).fetchall()
-
-    max_rows = args.parquet_row_group_size
-    min_rows = max(1, max_rows // 4)
-    total_rows = sum(c for _, c in zoomlevels)
-
-    # 適応的prefix長: 4^P ≈ ceil(total_rows / max_rows) を満たす P
-    if total_rows > max_rows:
-        target_rgs = math.ceil(total_rows / max_rows)
-        prefix_len = max(1, min(args.maxzoom, math.ceil(math.log(target_rgs, 4))))
-    else:
-        prefix_len = 1
-
+    total_rows = conn.execute("SELECT COUNT(*) FROM assigned").fetchone()[0]  # type: ignore[index]
     _log(f"      total rows:     {_fmt_int(total_rows)}")
     _log(
-        f"      row groups:     target ≈ {math.ceil(total_rows / max_rows)} "
-        f"(max_rows={max_rows}, prefix_len={prefix_len})"
+        f"      layout:         STR-pack "
+        f"(row_group_size={args.parquet_row_group_size}, zoom-aligned RGs)"
     )
-    _log("      writing row groups per zoom...")
 
-    rg_count = 0
-
-    with pq.ParquetWriter(args.output_file, schema) as writer:
-        accumulated_tables: list[pa.Table] = []
-        accumulated_rows = 0
-        current_zoom: int | None = None
-
-        def flush() -> None:
-            nonlocal accumulated_tables, accumulated_rows, current_zoom, rg_count
-            if accumulated_tables:
-                writer.write_table(pa.concat_tables(accumulated_tables))
-                accumulated_tables = []
-                accumulated_rows = 0
-                current_zoom = None
-                rg_count += 1
-
-        for zoomlevel, zl_count in zoomlevels:
-            if zl_count == 0:
-                continue
-
-            # zl_count > max_rows のzoomは単独で複数RGに分かれる。低zoom由来の
-            # 蓄積をここでflushして、高zoomのRGに低zoomデータが混ざるのを防ぐ。
-            if zl_count > max_rows and accumulated_rows > 0:
-                flush()
-
-            zoom_t0 = time.perf_counter()
-            zoom_rg_start = rg_count
-
-            query = build_output_query(geom_col, args.maxzoom, zoomlevel)
-            zl_table = conn.execute(query).fetch_arrow_table()
-
-            for chunk in _split_at_quadkey_prefix(
-                zl_table, max_rows, min_rows, prefix_len
-            ):
-                # 同一zoom内: prefix-1 alignmentを保つため、揃っていない場合flush。
-                # zoom境界では check をスキップ → 小さい低zoomは隣接zoomとパック。
-                if accumulated_tables and current_zoom == zoomlevel:
-                    acc_first = accumulated_tables[0].column("quadkey")[0].as_py()
-                    acc_last = accumulated_tables[-1].column("quadkey")[-1].as_py()
-                    new_first = chunk.column("quadkey")[0].as_py()
-                    if acc_first[:1] == acc_last[:1] and acc_first[:1] != new_first[:1]:
-                        flush()
-
-                if (
-                    accumulated_rows > 0
-                    and accumulated_rows + chunk.num_rows > max_rows
-                ):
-                    flush()
-                accumulated_tables.append(chunk)
-                accumulated_rows += chunk.num_rows
-                current_zoom = zoomlevel
-                if accumulated_rows >= max_rows:
-                    flush()
-
-            zoom_rgs_written = rg_count - zoom_rg_start
+    # 入力に bbox / zoomlevel カラムが既にある場合は、yosegi が再計算する
+    # 同名カラムと衝突して DuckDB が bbox_1 / zoomlevel_1 に rename してしまう。
+    # yosegi 側の値（geometry から再計算した bbox、pyramid の zoomlevel）を
+    # 正とするため、入力側を EXCLUDE で落とす。
+    base_cols = {row[0] for row in conn.execute("DESCRIBE base").fetchall()}
+    exclude_cols = ["_rep_geom", "_min_visible_zoom", geom_col]
+    for shadowed in ("bbox", "zoomlevel"):
+        if shadowed in base_cols:
+            exclude_cols.append(shadowed)
             _log(
-                f"        zoom {zoomlevel:>2}: {_fmt_int(zl_count):>14} rows, "
-                f"{zoom_rgs_written:>4} RG flushed  ({_fmt_secs(time.perf_counter() - zoom_t0)})"
+                f"      note: input column '{shadowed}' will be overwritten "
+                f"by yosegi-computed value"
             )
+    exclude_clause = ", ".join(exclude_cols)
 
-        flush()
-    _log(f"      row groups written: {rg_count}")
+    select_sql = f"""
+        SELECT
+            b.* EXCLUDE ({exclude_clause}),
+            ST_AsWKB(b.{geom_col}) AS {geom_col},
+            {{
+                'xmin': ST_XMin(b.{geom_col}),
+                'ymin': ST_YMin(b.{geom_col}),
+                'xmax': ST_XMax(b.{geom_col}),
+                'ymax': ST_YMax(b.{geom_col})
+            }} AS bbox,
+            a.zoomlevel
+        FROM base b
+        JOIN assigned a ON b.rowid = a._uid
+    """
+
+    sample_schema = conn.execute(f"{select_sql} LIMIT 0").fetch_arrow_table().schema
+    schema_with_geo = sample_schema.with_metadata(
+        {**(sample_schema.metadata or {}), b"geo": geo_json_bytes}
+    )
+
+    zooms_present = [
+        int(r[0])
+        for r in conn.execute(
+            "SELECT DISTINCT zoomlevel FROM assigned ORDER BY zoomlevel"
+        ).fetchall()
+    ]
+    order_clause = _str_order_clause(geom_col, args.parquet_row_group_size)
+    m = args.parquet_row_group_size
+
+    writer = pq.ParquetWriter(args.output_file, schema_with_geo)
+    try:
+        for z in zooms_present:
+            sql = f"{select_sql} WHERE a.zoomlevel = {z} ORDER BY {order_clause}"
+            tbl = conn.execute(sql).fetch_arrow_table()
+            if tbl.num_rows == 0:
+                continue
+            tbl = tbl.replace_schema_metadata(schema_with_geo.metadata)
+            writer.write_table(tbl, row_group_size=m)
+            n_rgs = (tbl.num_rows + m - 1) // m
+            _log(
+                f"      zoom {z:>2}: {_fmt_int(tbl.num_rows):>14} rows → "
+                f"{n_rgs:>5} row group(s)"
+            )
+    finally:
+        writer.close()
 
 
 def process(args: Args) -> None:
@@ -420,7 +318,6 @@ def process(args: Args) -> None:
     _log("\n[1/3] Loading input")
     phase_t0 = time.perf_counter()
 
-    # 入力ファイル読み込み（GDAL形式を優先、失敗したらParquet）
     safe_input = _sql_escape(args.input_file)
     try:
         input_query = f"SELECT * FROM ST_Read('{safe_input}')"
@@ -431,7 +328,6 @@ def process(args: Args) -> None:
         input_format = "Parquet (read_parquet)"
     _log(f"      format:         {input_format}")
 
-    # geometry column検出: 指定されていればそれを信用、未指定なら型名に "geometry" を含む列を採用
     if args.geometry_column is not None:
         geom_col = args.geometry_column
         _log(f"      geometry col:   {geom_col} (specified)")
@@ -445,18 +341,10 @@ def process(args: Args) -> None:
 
     _log("      building base table (with representative points)...")
 
-    # baseテーブル作成（入力データ + _rep_geom + _min_visible_zoom）
-    # _uid は base.rowid を後段で参照することで代用し、row_number() OVER () による
-    # シングルスレッド実行を回避する。
     # _rep_geom は常に POINT であることを保証する (ST_X/ST_Y で参照するため)。
-    # ST_PointOnSurface は POINT に対しては恒等的、MULTIPOINT/LINE/POLYGON は POINT を返す。
     # _min_visible_zoom: bbox の最大辺長が resolution(z) * factor 以上になる最小 z。
-    # factor==0 のときはフィルタを無効化するため minzoom を入れる。
     factor = args.min_visible_size_factor
     if factor > 0:
-        # threshold(z) = resolution_base * factor / multiplier^z
-        # eligible at z iff size >= threshold(z)
-        #   => z >= log_multiplier(resolution_base * factor / size)
         size_expr = (
             f"GREATEST("
             f"ST_XMax({geom_col}) - ST_XMin({geom_col}), "
@@ -496,9 +384,6 @@ def process(args: Args) -> None:
         FROM ({input_query});
     """)
 
-    # assignedテーブル作成
-    # PRIMARY KEY は付けない: ユニーク性はアルゴリズム上保証されており、
-    # DuckDB は PK 制約付き INSERT をシリアル化するため並列度を下げる。
     conn.execute("""
         CREATE TABLE assigned (
             _uid BIGINT,
@@ -509,8 +394,6 @@ def process(args: Args) -> None:
     total_count = conn.execute("SELECT COUNT(*) FROM base").fetchone()[0]  # type: ignore[index]
     _log(f"      features:       {_fmt_int(total_count)}")
 
-    # geometry 型は Phase 2 のデフォルト sort 決定と Phase 3 のメタデータで使うため
-    # ここで一度だけスキャンする
     geometry_types_raw: set[str] = {
         r[0]
         for r in conn.execute(
@@ -525,10 +408,6 @@ def process(args: Args) -> None:
 
     assigned_count = 0
 
-    # sort_by 未指定時は geometry 型から既定値を決める:
-    #   line 系のみ → ST_Length DESC (長い順)
-    #   polygon 系のみ → ST_Area DESC (大きい順)
-    #   それ以外 / 混在 → hash(_uid) (ランダム)
     effective_sort_by = args.sort_by
     if effective_sort_by is None:
         if geometry_types_raw and geometry_types_raw <= {
@@ -543,7 +422,6 @@ def process(args: Args) -> None:
             effective_sort_by = f"ST_Area({geom_col}) DESC"
     _log(f"      sort key:       {effective_sort_by or 'hash(_uid)'}")
 
-    # sort_by の値を remaining に取り込み、ループ内での base への JOIN を回避する
     if effective_sort_by:
         sort_expr, sort_direction = _split_sort_direction(effective_sort_by)
         sort_select = f", ({sort_expr}) AS _sort_key"
@@ -552,20 +430,15 @@ def process(args: Args) -> None:
         sort_select = ""
         order_by = "hash(r._uid)"
 
-    # 未割り当てfeatureだけを保持し、zoomごとの反復でbase全体を再走査しない
     conn.execute(f"""
         CREATE TEMP TABLE remaining AS
         SELECT rowid AS _uid, _rep_geom, _min_visible_zoom{sort_select}
         FROM base;
     """)
 
-    # zoomlevelループ: 各zoomで代表点を1つ選んでassign
-    # bbox サイズが小さく resolution(z) * factor を満たさない feature は
-    # _min_visible_zoom > z で除外され、より高い zoom でのみ候補となる。
     for z in range(args.minzoom, args.maxzoom):
         zoom_t0 = time.perf_counter()
         prec = args.resolution_base / (args.resolution_multiplier**z)
-        # prec 度刻みの度空間グリッドで代表featureを 1 つ選ぶ。
         conn.execute(f"""
             CREATE TEMP TABLE newly_assigned AS
             SELECT r._uid, {z} AS zoomlevel
@@ -607,7 +480,6 @@ def process(args: Args) -> None:
         if assigned_count == total_count:
             break
 
-    # 残りはmaxzoomに割り当て
     remaining_count = total_count - assigned_count
     if remaining_count > 0:
         zoom_t0 = time.perf_counter()
