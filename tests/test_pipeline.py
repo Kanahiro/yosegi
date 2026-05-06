@@ -21,7 +21,7 @@ def _make_args(input_file: Path, output_file: Path, **overrides) -> Args:
 
 
 def _expected_columns() -> set[str]:
-    return {"id", "geometry", "bbox", "zoomlevel", "quadkey"}
+    return {"id", "geometry", "bbox", "zoomlevel"}
 
 
 def test_polygon_pipeline_preserves_rows(
@@ -82,18 +82,31 @@ def test_explicit_sort_by_overrides_default(
     assert t.num_rows == 2000
 
 
-def test_output_is_sorted_by_zoom_then_quadkey(
+def test_output_is_sorted_by_zoom(
     polygons_parquet: Path, tmp_path: Path
 ) -> None:
     out = tmp_path / "out.parquet"
     process(_make_args(polygons_parquet, out))
     t = pq.read_table(out)
     zooms = t["zoomlevel"].to_pylist()
-    quadkeys = t["quadkey"].to_pylist()
     for i in range(1, len(zooms)):
-        prev = (zooms[i - 1], quadkeys[i - 1])
-        curr = (zooms[i], quadkeys[i])
-        assert prev <= curr, f"row {i} is out of order: {prev} > {curr}"
+        assert zooms[i - 1] <= zooms[i], (
+            f"row {i} zoom out of order: {zooms[i - 1]} > {zooms[i]}"
+        )
+
+
+def test_output_has_geo_metadata(polygons_parquet: Path, tmp_path: Path) -> None:
+    import json
+
+    out = tmp_path / "out.parquet"
+    process(_make_args(polygons_parquet, out))
+    pf = pq.ParquetFile(out)
+    md = pf.schema.to_arrow_schema().metadata
+    assert b"geo" in md
+    geo = json.loads(md[b"geo"])
+    assert geo["version"] == "1.1.0"
+    assert geo["primary_column"] == "geometry"
+    assert "covering" in geo["columns"]["geometry"]
 
 
 def test_size_factor_filters_small_polygons_at_low_zoom(
