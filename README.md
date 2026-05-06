@@ -174,8 +174,7 @@ The two Hilbert variants are within noise of each other — the loss is intrinsi
 
 <https://d3ks1i00ysei8.cloudfront.net/>
 
-- DeckGL + GeoArrowScatterPlotLayer + DuckDB
-  - Query Parquet with DuckDB and pass results to GeoArrowScatterPlotLayer
+- Client - Lambda - S3(Pyramid Parquet) architecture.
 
 ## Benefits
 
