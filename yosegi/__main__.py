@@ -5,6 +5,7 @@ import time
 from dataclasses import dataclass
 
 import duckdb
+import pyarrow.parquet as pq
 
 
 def _log(msg: str = "") -> None:
@@ -104,7 +105,6 @@ def parse_arguments() -> Args:
             "Set to 0 to disable filtering (default: 1.0)"
         ),
     )
-
     args = parser.parse_args()
 
     if not 1 <= args.maxzoom <= 23:
@@ -145,18 +145,54 @@ _GEOMETRY_TYPE_MAP = {
 }
 
 
+def _str_order_clause(geom_col: str, row_group_size: int) -> str:
+    """zoom 1 つ分の SELECT に対する ORDER BY 句を返す（Sort-Tile-Recursive packing）。
+
+    bbox-center-x で sqrt(N/M) 本のストリップに分割し、ストリップ内は
+    bbox-center-y を boustrophedon（交互に正負反転）でソート。
+    呼び出し側は単一 zoom にフィルタ済みの SELECT を流す前提。
+    """
+    m = float(row_group_size)
+    strip_id = f"""
+        CAST(FLOOR(
+            (ROW_NUMBER() OVER (
+                ORDER BY (ST_XMin(b.{geom_col}) + ST_XMax(b.{geom_col})) / 2
+            ) - 1)
+            / GREATEST(
+                {m},
+                {m} * CAST(GREATEST(1, ROUND(SQRT(
+                    COUNT(*) OVER () / {m}
+                ))) AS BIGINT)
+            )
+        ) AS BIGINT)
+    """
+    return f"""
+        {strip_id},
+        CASE WHEN ({strip_id}) % 2 = 0
+        THEN  (ST_YMin(b.{geom_col}) + ST_YMax(b.{geom_col})) / 2
+        ELSE -(ST_YMin(b.{geom_col}) + ST_YMax(b.{geom_col})) / 2
+        END
+    """
+
+
 def write_geoparquet(
     conn: duckdb.DuckDBPyConnection,
     args: Args,
     geom_col: str,
     geometry_types_raw: set[str],
 ) -> None:
-    """GeoParquetを書き込む。
+    """GeoParquet を書き込む。
 
-    全行を (zoomlevel, ST_Hilbert) でソートして DuckDB の COPY TO で出力する。
-    Hilbert curve は Z-order (quadkey) と違い隣接連続性が高く、隣接行の属性
-    相関が保たれるため辞書/RLE が効きやすい。RowGroup は固定サイズで切り、
-    bbox covering 統計でプッシュダウンを効かせる。
+    各 zoom level を独立に DuckDB から取り出し、pyarrow ParquetWriter で
+    書き込む。`writer.write_table(..., row_group_size=M)` は呼び出しごとに
+    新しい row group を切るため、**zoom 境界は必ず row group 境界と一致する**。
+
+    結果として:
+    - 1 つの RG が複数 zoom の行を含むことはない (zoomlevel 列の RG 統計が tight)
+    - 各 zoom の最後の RG は M 未満になり得る (低 zoom で row 数 < M の場合)
+    - bbox covering 統計の混入も無くなる (RG bbox は単一 zoom の集合)
+
+    各 zoom 内は Sort-Tile-Recursive bbox packing でソートする。
     """
 
     _log("      computing bbox / geometry types...")
@@ -178,17 +214,6 @@ def write_geoparquet(
     bx = [float(v) for v in bbox_row]
     _log(f"      bbox:           [{bx[0]:.4f}, {bx[1]:.4f}, {bx[2]:.4f}, {bx[3]:.4f}]")
 
-    # Hilbert の bounds は退化 (幅 or 高さ 0) を避けるため最低限のマージンを入れる
-    xmin, ymin, xmax, ymax = bx
-    if xmax <= xmin:
-        xmax = xmin + 1.0
-    if ymax <= ymin:
-        ymax = ymin + 1.0
-    bounds_sql = (
-        f"{{'min_x': {xmin}, 'min_y': {ymin}, "
-        f"'max_x': {xmax}, 'max_y': {ymax}}}::BOX_2D"
-    )
-
     column_metadata: dict = {
         "encoding": "WKB",
         "geometry_types": geometry_types,
@@ -207,34 +232,75 @@ def write_geoparquet(
         "primary_column": geom_col,
         "columns": {geom_col: column_metadata},
     }
-    geo_json = _sql_escape(json.dumps(geo_metadata))
+    geo_json_bytes = json.dumps(geo_metadata).encode("utf-8")
 
     total_rows = conn.execute("SELECT COUNT(*) FROM assigned").fetchone()[0]  # type: ignore[index]
     _log(f"      total rows:     {_fmt_int(total_rows)}")
-    _log(f"      writing parquet (row_group_size={args.parquet_row_group_size})...")
+    _log(
+        f"      layout:         STR-pack "
+        f"(row_group_size={args.parquet_row_group_size}, zoom-aligned RGs)"
+    )
 
-    safe_output = _sql_escape(args.output_file)
-    conn.execute(f"""
-        COPY (
-            SELECT
-                b.* EXCLUDE (_rep_geom, _min_visible_zoom, {geom_col}),
-                ST_AsWKB(b.{geom_col}) AS {geom_col},
-                {{
-                    'xmin': ST_XMin(b.{geom_col}),
-                    'ymin': ST_YMin(b.{geom_col}),
-                    'xmax': ST_XMax(b.{geom_col}),
-                    'ymax': ST_YMax(b.{geom_col})
-                }} AS bbox,
-                a.zoomlevel
-            FROM base b
-            JOIN assigned a ON b.rowid = a._uid
-            ORDER BY a.zoomlevel, ST_Hilbert(b._rep_geom, {bounds_sql})
-        ) TO '{safe_output}' (
-            FORMAT PARQUET,
-            ROW_GROUP_SIZE {args.parquet_row_group_size},
-            KV_METADATA {{geo: '{geo_json}'}}
-        );
-    """)
+    # 入力に bbox / zoomlevel カラムが既にある場合は、yosegi が再計算する
+    # 同名カラムと衝突して DuckDB が bbox_1 / zoomlevel_1 に rename してしまう。
+    # yosegi 側の値（geometry から再計算した bbox、pyramid の zoomlevel）を
+    # 正とするため、入力側を EXCLUDE で落とす。
+    base_cols = {row[0] for row in conn.execute("DESCRIBE base").fetchall()}
+    exclude_cols = ["_rep_geom", "_min_visible_zoom", geom_col]
+    for shadowed in ("bbox", "zoomlevel"):
+        if shadowed in base_cols:
+            exclude_cols.append(shadowed)
+            _log(
+                f"      note: input column '{shadowed}' will be overwritten "
+                f"by yosegi-computed value"
+            )
+    exclude_clause = ", ".join(exclude_cols)
+
+    select_sql = f"""
+        SELECT
+            b.* EXCLUDE ({exclude_clause}),
+            ST_AsWKB(b.{geom_col}) AS {geom_col},
+            {{
+                'xmin': ST_XMin(b.{geom_col}),
+                'ymin': ST_YMin(b.{geom_col}),
+                'xmax': ST_XMax(b.{geom_col}),
+                'ymax': ST_YMax(b.{geom_col})
+            }} AS bbox,
+            a.zoomlevel
+        FROM base b
+        JOIN assigned a ON b.rowid = a._uid
+    """
+
+    sample_schema = conn.execute(f"{select_sql} LIMIT 0").fetch_arrow_table().schema
+    schema_with_geo = sample_schema.with_metadata(
+        {**(sample_schema.metadata or {}), b"geo": geo_json_bytes}
+    )
+
+    zooms_present = [
+        int(r[0])
+        for r in conn.execute(
+            "SELECT DISTINCT zoomlevel FROM assigned ORDER BY zoomlevel"
+        ).fetchall()
+    ]
+    order_clause = _str_order_clause(geom_col, args.parquet_row_group_size)
+    m = args.parquet_row_group_size
+
+    writer = pq.ParquetWriter(args.output_file, schema_with_geo)
+    try:
+        for z in zooms_present:
+            sql = f"{select_sql} WHERE a.zoomlevel = {z} ORDER BY {order_clause}"
+            tbl = conn.execute(sql).fetch_arrow_table()
+            if tbl.num_rows == 0:
+                continue
+            tbl = tbl.replace_schema_metadata(schema_with_geo.metadata)
+            writer.write_table(tbl, row_group_size=m)
+            n_rgs = (tbl.num_rows + m - 1) // m
+            _log(
+                f"      zoom {z:>2}: {_fmt_int(tbl.num_rows):>14} rows → "
+                f"{n_rgs:>5} row group(s)"
+            )
+    finally:
+        writer.close()
 
 
 def process(args: Args) -> None:

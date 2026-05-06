@@ -157,22 +157,24 @@ version = "0.10.0"
 source = { editable = "." }
 dependencies = [
     { name = "duckdb" },
+    { name = "pyarrow" },
 ]
 
 [package.dev-dependencies]
 dev = [
-    { name = "pyarrow" },
     { name = "pytest" },
     { name = "ruff" },
     { name = "ty" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "duckdb", specifier = ">=1.4.3" }]
+requires-dist = [
+    { name = "duckdb", specifier = ">=1.4.3" },
+    { name = "pyarrow", specifier = ">=15.0.0" },
+]
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "pyarrow", specifier = ">=15.0.0" },
     { name = "pytest", specifier = ">=8.0" },
     { name = "ruff", specifier = ">=0.14.10" },
     { name = "ty", specifier = ">=0.0.1a35" },
