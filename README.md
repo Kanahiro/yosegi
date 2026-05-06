@@ -115,7 +115,7 @@ DuckDB's parquet reader prunes row groups using the `bbox.*` and `zoomlevel` col
 
 ## Physical layout: STR-pack
 
-Within each zoomlevel, yosegi orders rows with [Sort-Tile-Recursive (STR) bbox packing](https://www.researchgate.net/publication/2629750_STR_A_Simple_and_Efficient_Algorithm_for_R-Tree_Packing). The goal is to keep each row group's bbox as compact as possible so that bbox-covering predicates prune effectively.
+Within each zoomlevel, yosegi orders rows with [Sort-Tile-Recursive (STR) bbox packing](https://www.researchgate.net/publication/3686660_STR_A_Simple_and_Efficient_Algorithm_for_R-Tree_Packing). The goal is to keep each row group's bbox as compact as possible so that bbox-covering predicates prune effectively.
 
 ### The algorithm
 
