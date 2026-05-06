@@ -190,16 +190,7 @@ A density-based clustering approach is used. At lower zoom we don't need to rend
 
 `--min-visible-size-factor` additionally skips features whose bbox is too small to be visible at a given zoom's grid resolution.
 
-## Why bbox covering instead of quadkey?
-
-Earlier versions of yosegi appended a `quadkey` column and queried with `quadkey LIKE 'prefix%'`. This was replaced by the GeoParquet 1.1 bbox covering pattern because:
-
-- Bbox struct min/max statistics are written by parquet writers automatically; row-group pruning is fully transparent to the consumer.
-- A query bbox doesn't have to be aligned to a tile boundary.
-- It's the canonical mechanism in the GeoParquet 1.1 specification, supported out of the box by DuckDB, GeoPandas, GDAL, and SedonaDB.
-- The output stays a clean GeoParquet — no yosegi-specific column required for spatial filtering.
-
-## Why not tiles?
+## Why not pre-rendered tiles?
 
 - Building a tileset purely for streaming is operational overhead; streaming directly from one source file is simpler.
 - Lower-zoom tile contents are wasted once you zoom in past them, and the same feature is repeated across zooms.
