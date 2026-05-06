@@ -137,7 +137,7 @@ def synth_polygons(
     ).fetchone()
     con.close()
     assert bx is not None
-    return tuple(float(v) for v in bx)  # type: ignore[return-value]
+    return (float(bx[0]), float(bx[1]), float(bx[2]), float(bx[3]))
 
 
 # ---------------------------------------------------------------------------
@@ -310,7 +310,7 @@ def static_selectivity(
     return out
 
 
-def _pctl(xs: list[float], p: float) -> float:
+def _pctl(xs: list[int] | list[float], p: float) -> float:
     s = sorted(xs)
     if not s:
         return 0.0
@@ -401,7 +401,8 @@ def main() -> None:
                 f" FROM ST_Read('{input_path}')"
             ).fetchone()
         con.close()
-        bbox = tuple(float(v) for v in bx)  # type: ignore[arg-type]
+        assert bx is not None
+        bbox = (float(bx[0]), float(bx[1]), float(bx[2]), float(bx[3]))
     else:
         input_path = out_dir / f"synth-{args.distribution}.parquet"
         print(
