@@ -285,7 +285,12 @@ def write_geoparquet(
     order_clause = _str_order_clause(geom_col, args.parquet_row_group_size)
     m = args.parquet_row_group_size
 
-    writer = pq.ParquetWriter(args.output_file, schema_with_geo)
+    writer = pq.ParquetWriter(
+        args.output_file,
+        schema_with_geo,
+        compression="zstd",
+        compression_level=3,
+    )
     try:
         for z in zooms_present:
             sql = f"{select_sql} WHERE a.zoomlevel = {z} ORDER BY {order_clause}"
