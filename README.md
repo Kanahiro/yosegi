@@ -2,6 +2,8 @@
 
 Yosegi is a tool to generate Pyramid (Geo)Parquet files - optimized for streaming large geospatial datasets.
 
+> **Note:** The ideas explored in Yosegi are being evolved into a more general-purpose form at [Kanahiro/cloud-optimized-geoparquet](https://github.com/Kanahiro/cloud-optimized-geoparquet). Future development of the pyramid / cloud-optimized GeoParquet concept will continue there.
+
 ## Usage
 
 ```bash
